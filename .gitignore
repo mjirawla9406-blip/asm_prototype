@@ -1,0 +1,14 @@
+# Logs
+*.log
+__pycache__/
+*.pyc
+
+# Local Data
+data/
+backend/data/
+frontend/.next/
+frontend/node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
