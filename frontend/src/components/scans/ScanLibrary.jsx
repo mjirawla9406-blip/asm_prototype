@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-    Search, Upload, Trash2, Play, Clock,
+    Search, Upload, Trash2, Play, Clock, Activity,
     CheckCircle, AlertCircle, Loader2, Plus, ChevronDown
 } from 'lucide-react';
 import useStore from '@/store/useStore';
@@ -168,6 +168,10 @@ export default function ScanLibrary() {
 
     const handleStartAnalysis = async (scanId, e) => {
         if (e) e.stopPropagation();
+        
+        // Optimistically update scan status to processing in local list
+        setScans(scans.map(s => s.scan_id === scanId ? { ...s, status: 'processing' } : s));
+        
         setAnalysisLoading(true);
         setAnalysisProgress(0, 'Starting analysis...');
         try {
@@ -266,44 +270,75 @@ export default function ScanLibrary() {
                             transition: 'all 0.2s ease',
                         }}
                     >
-                        {/* Status Badge */}
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-                            {scan.status === 'completed' ? (
-                                <div style={{ 
-                                    display: 'flex', alignItems: 'center', gap: 4, 
-                                    background: 'var(--accent-primary)', color: '#000', 
-                                    padding: '3px 8px', borderRadius: 4, fontSize: 9, fontWeight: 800
-                                }}>
-                                    <CheckCircle size={10} strokeWidth={3} />
-                                    Complete
-                                </div>
-                            ) : (
-                                <div style={{ 
-                                    display: 'flex', alignItems: 'center', gap: 4, 
-                                    background: 'rgba(255,140,0,0.2)', color: 'var(--accent-primary)', 
-                                    padding: '3px 8px', borderRadius: 4, fontSize: 9, fontWeight: 800
-                                }}>
-                                    <Activity size={10} />
-                                    {scan.status === 'processing' ? 'Processing...' : 'Uploaded'}
-                                </div>
-                            )}
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); handleStartAnalysis(scan.scan_id, e); }}
-                                style={{ 
-                                    background: 'rgba(255,140,0,0.1)', border: '1px solid var(--accent-primary)', 
-                                    color: 'var(--accent-primary)', padding: '2px 6px', borderRadius: 4, 
-                                    fontSize: 9, cursor: 'pointer', fontWeight: 700 
-                                }}
-                                title="Re-run analysis with latest coloring"
-                            >
-                                Re-analyze
-                            </button>
-                            <button 
-                                onClick={(e) => handleDelete(scan.scan_id, e)}
-                                style={{ background: 'none', border: 'none', marginLeft: 8, cursor: 'pointer', color: '#ef4444', opacity: 0.6 }}
-                            >
-                                <Trash2 size={14} />
-                            </button>
+                        {/* Status Badge & Action */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                {scan.status === 'completed' ? (
+                                    <div style={{ 
+                                        display: 'flex', alignItems: 'center', gap: 4, 
+                                        background: 'rgba(34, 197, 94, 0.15)', color: 'var(--success)', 
+                                        padding: '4px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                                        border: '1px solid rgba(34, 197, 94, 0.3)'
+                                    }}>
+                                        <CheckCircle size={10} />
+                                        Analyzed
+                                    </div>
+                                ) : scan.status === 'processing' ? (
+                                    <div style={{ 
+                                        display: 'flex', alignItems: 'center', gap: 4, 
+                                        background: 'rgba(255,140,0,0.1)', color: 'var(--accent-primary)', 
+                                        padding: '4px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                                        border: '1px solid rgba(255,140,0,0.3)'
+                                    }}>
+                                        <Loader2 size={10} className="animate-spin" />
+                                        Analyzing...
+                                    </div>
+                                ) : (
+                                    <div style={{ 
+                                        display: 'flex', alignItems: 'center', gap: 4, 
+                                        background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', 
+                                        padding: '4px 8px', borderRadius: 4, fontSize: 10, fontWeight: 700,
+                                        border: '1px solid rgba(255,255,255,0.1)'
+                                    }}>
+                                        <Activity size={10} />
+                                        Uploaded
+                                    </div>
+                                )}
+                             </div>
+
+                             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                {scan.status !== 'processing' && (
+                                    <button 
+                                        onClick={(e) => { e.stopPropagation(); handleStartAnalysis(scan.scan_id, e); }}
+                                        style={{ 
+                                            background: scan.status === 'completed' ? 'rgba(255,255,255,0.05)' : 'var(--accent-primary)',
+                                            border: `1px solid ${scan.status === 'completed' ? 'rgba(255,255,255,0.1)' : 'var(--accent-primary)'}`,
+                                            color: scan.status === 'completed' ? 'var(--text-primary)' : '#000',
+                                            padding: '4px 10px', borderRadius: 6, 
+                                            fontSize: 10, cursor: 'pointer', fontWeight: 800,
+                                            display: 'flex', alignItems: 'center', gap: 4,
+                                            transition: 'all 0.2s ease'
+                                        }}
+                                        title={scan.status === 'completed' ? "Run analysis again" : "Start structural mapping"}
+                                    >
+                                        <Play size={10} fill={scan.status === 'completed' ? "currentColor" : "#000"} />
+                                        {scan.status === 'completed' ? 'Re-analyze' : 'Analyze Now'}
+                                    </button>
+                                )}
+                                
+                                <button 
+                                    onClick={(e) => handleDelete(scan.scan_id, e)}
+                                    style={{ 
+                                        background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', 
+                                        width: 26, height: 26, borderRadius: 6, display: 'flex', alignItems: 'center', 
+                                        justifyContent: 'center', cursor: 'pointer', color: '#ef4444', 
+                                        transition: 'all 0.2s ease'
+                                    }}
+                                    title="Delete scan"
+                                >
+                                    <Trash2 size={12} />
+                                </button>
+                             </div>
                         </div>
 
                         {/* Name and ID */}

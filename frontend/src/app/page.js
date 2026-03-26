@@ -31,11 +31,8 @@ export default function Home() {
 
   const totalScans = scans.length;
   const totalBytes = scans.reduce((acc, s) => {
-    // Attempt to parse size string like "250.0 MB" or "1.2 GB"
-    const val = parseFloat(s.size) || 0;
-    if (s.size?.includes('GB')) return acc + (val * 1024 * 1024 * 1024);
-    if (s.size?.includes('MB')) return acc + (val * 1024 * 1024);
-    return acc + val;
+    // file_size is already a float in MB from the backend
+    return acc + (s.file_size || 0) * 1024 * 1024;
   }, 0);
 
   const formatVolume = (bytes) => {

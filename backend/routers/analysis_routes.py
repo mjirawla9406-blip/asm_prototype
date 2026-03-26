@@ -129,6 +129,7 @@ def run_structural_mapping(
             viz_points = points_clean[viz_indices]
         else:
             viz_points = points_clean
+            viz_indices = np.arange(len(points_clean))
 
         centroid = np.mean(viz_points, axis=0)
         viz_centered = viz_points - centroid
