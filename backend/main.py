@@ -4,6 +4,14 @@ Main application entry point.
 """
 import logging
 from pathlib import Path
+
+# Load environment variables from .env (API keys, config)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed — env vars must be set manually
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,7 +28,9 @@ app = FastAPI(
     description=(
         "AI-powered structural mapping of underground mine point cloud data. "
         "Detects discontinuity planes, classifies them into structural sets, "
-        "and generates mining intelligence insights."
+        "and generates mining intelligence insights.\n\n"
+        "**BIMSu Integration**: POST /api/analyse, POST /webhook/scan-complete, "
+        "GET /scan/{scan_id}/status, GET /export/dips/{scan_id}"
     ),
     version="1.0.0",
 )
@@ -37,15 +47,18 @@ app.add_middleware(
 # Register routers
 from routers.scan_routes import router as scan_router
 from routers.analysis_routes import router as analysis_router
+from routers.bimsu_routes import router as bimsu_router
 
 app.include_router(scan_router)
 app.include_router(analysis_router)
+app.include_router(bimsu_router)
 
 # Ensure data directories exist
 DATA_DIR = Path("data")
 (DATA_DIR / "scans").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "metadata").mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "results").mkdir(parents=True, exist_ok=True)
+(DATA_DIR / "exports").mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/")
@@ -57,6 +70,9 @@ async def root():
         "endpoints": {
             "scans": "/api/scans",
             "analysis": "/api/analysis",
+            "analyse_bimsu": "/api/analyse",
+            "webhook": "/webhook/scan-complete",
+            "export": "/export/dips/{scan_id}",
             "docs": "/docs",
         }
     }

@@ -1,17 +1,62 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import useStore from '@/store/useStore';
 
 export default function StereonetPlot() {
     const { analysisResult, selectedPlaneId, setSelectedPlaneId, visibleSets } = useStore();
+    const [showBackend, setShowBackend] = useState(true);
     
     const planes = useMemo(() => {
         if (!analysisResult?.planes) return [];
         return analysisResult.planes.filter(p => visibleSets.has(p.set_id));
     }, [analysisResult, visibleSets]);
 
-    // Constants for projection
+    // If backend stereonet is available and user wants to see it, show it
+    if (showBackend && analysisResult?.stereonet_b64) {
+        return (
+            <div style={{ 
+                position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+                background: 'var(--bg-tertiary)', borderRadius: 8, padding: 6,
+                border: '1px solid var(--border-color)'
+            }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase' }}>
+                        Stereonet (mplstereonet)
+                    </div>
+                    <button 
+                        onClick={() => setShowBackend(false)}
+                        style={{
+                            fontSize: 8, background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                            borderRadius: 4, padding: '2px 6px', color: 'var(--text-muted)',
+                            cursor: 'pointer', fontWeight: 600,
+                        }}
+                    >
+                        Interactive View
+                    </button>
+                </div>
+                <div style={{ flex: 1, position: 'relative', borderRadius: 6, overflow: 'hidden' }}>
+                    <img
+                        src={`data:image/png;base64,${analysisResult.stereonet_b64}`}
+                        alt="Schmidt Equal-Area Stereonet"
+                        style={{ 
+                            width: '100%', height: '100%', objectFit: 'contain', 
+                            display: 'block', background: '#fff', borderRadius: 6 
+                        }}
+                    />
+                </div>
+                <div style={{ 
+                    position: 'absolute', bottom: 12, right: 12, 
+                    fontSize: 9, color: 'var(--text-muted)', textAlign: 'right'
+                }}>
+                    Schmidt Equal-Area (Lower Hemisphere)<br/>
+                    Backend-rendered via mplstereonet
+                </div>
+            </div>
+        );
+    }
+
+    // SVG interactive stereonet (fallback / interactive mode)
     const size = 220;
     const padding = 12;
     const radius = (size - padding * 2) / 2;
@@ -37,8 +82,22 @@ export default function StereonetPlot() {
             background: 'var(--bg-tertiary)', borderRadius: 8, padding: 6,
             border: '1px solid var(--border-color)'
         }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4, textTransform: 'uppercase' }}>
-                Stereonet (Poles)
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--text-primary)', textTransform: 'uppercase' }}>
+                    Stereonet (Poles)
+                </div>
+                {analysisResult?.stereonet_b64 && (
+                    <button 
+                        onClick={() => setShowBackend(true)}
+                        style={{
+                            fontSize: 8, background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                            borderRadius: 4, padding: '2px 6px', color: 'var(--text-muted)',
+                            cursor: 'pointer', fontWeight: 600,
+                        }}
+                    >
+                        Publication View
+                    </button>
+                )}
             </div>
             
             <div style={{ flex: 1, position: 'relative', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>

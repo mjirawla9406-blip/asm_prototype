@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from models.schemas import ScanMetadata, ScanUploadResponse, ScanListResponse
 
@@ -330,4 +330,86 @@ async def get_pointcloud_data(scan_id: str, max_points: int = 50000):
         raise HTTPException(status_code=500, detail=f"Failed to process point cloud: {str(e)}")
 
 
-import numpy as np
+
+def _ensure_potree_compatible(file_path: Path) -> Path:
+    if file_path.suffix.lower() not in ['.las', '.laz']:
+        return file_path
+        
+    compatible_path = file_path.parent / f"potree_compat_{file_path.name}"
+    if compatible_path.exists():
+        return compatible_path
+        
+    try:
+        import laspy
+        
+        # Read the file header first to check if conversion is needed
+        with laspy.open(file_path) as f:
+            if f.header.version.major == 1 and f.header.version.minor <= 2 and f.header.point_format.id <= 3:
+                return file_path
+        
+        # Needs conversion
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Converting {file_path.name} to LAS 1.2 Format 3 for Potree compatibility")
+        
+        las = laspy.read(file_path)
+        
+        # Determine the target format. Format 3 has RGB and GPS time.
+        has_color = hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue')
+        target_format = 3 if has_color else 0
+        
+        # Create a new LAS file with version 1.2
+        new_header = laspy.LasHeader(point_format=target_format, version="1.2")
+        new_header.scales = las.header.scales
+        new_header.offsets = las.header.offsets
+        
+        new_las = laspy.LasData(new_header)
+        
+        # Copy standard dimensions
+        new_las.x = las.x
+        new_las.y = las.y
+        new_las.z = las.z
+        
+        if hasattr(las, 'intensity') and hasattr(new_las, 'intensity'):
+            new_las.intensity = las.intensity
+            
+        if hasattr(las, 'classification') and hasattr(new_las, 'classification'):
+            new_las.classification = las.classification
+            
+        if target_format == 3 and hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
+            new_las.red = las.red
+            new_las.green = las.green
+            new_las.blue = las.blue
+            
+        new_las.write(compatible_path)
+        return compatible_path
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to convert LAS for Potree: {e}")
+        return file_path
+
+
+@router.get("/{scan_id}/file")
+async def get_scan_file(scan_id: str):
+    scan_folder = SCANS_DIR / scan_id
+    
+    if not scan_folder.exists():
+        raise HTTPException(status_code=404, detail=f"Scan folder {scan_id} not found")
+
+    # Find whatever file is in that folder (ignore our generated compat files for the search)
+    for fname in os.listdir(scan_folder):
+        if fname.lower().endswith(('.las', '.laz', '.ply')) and not fname.startswith('potree_compat_'):
+            file_path = scan_folder / fname
+            
+            # Ensure compatibility for Potree
+            served_path = _ensure_potree_compatible(file_path)
+            
+            return FileResponse(
+                path=served_path,
+                media_type="application/octet-stream",
+                filename=fname, # still send original filename
+                headers={"Accept-Ranges": "bytes"}  # needed for large file streaming
+            )
+    
+    return {"error": "No scan file found"}

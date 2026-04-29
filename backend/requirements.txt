@@ -10,4 +10,11 @@ scikit-learn>=1.1
 laspy>=2.0
 lazrs
 matplotlib>=3.5
+mplstereonet>=0.6
+python-dotenv>=1.0
 aiofiles==23.2.1
+torch>=2.0.0
+spconv-cpu
+
+reportlab>=4.0
+Pillow>=10.0

@@ -92,7 +92,7 @@ function PlaneDistributionChart({ sets }) {
     const data = {
         labels: sets.map(s => `Set ${s.set_id + 1}`),
         datasets: [{
-            data: sets.map(s => s.num_planes),
+            data: sets.map(s => s.plane_count ?? s.num_planes ?? 0),
             backgroundColor: sets.map(s => s.color + '99'),
             borderColor: sets.map(s => s.color),
             borderWidth: 2,
@@ -298,7 +298,11 @@ function SetQualityRadar({ sets, planes }) {
         },
         {
             label: 'Coverage',
-            data: sets.map(s => Math.min(100, s.total_points / 50)),
+            data: sets.map(s => {
+                if (s.persistence_m != null) return Math.min(100, s.persistence_m * 10);
+                if (s.total_points != null) return Math.min(100, s.total_points / 50);
+                return 0;
+            }),
             backgroundColor: 'rgba(59, 130, 246, 0.2)',
             borderColor: '#3b82f6',
             borderWidth: 2,

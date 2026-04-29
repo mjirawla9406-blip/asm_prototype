@@ -9,7 +9,7 @@ import useStore from '@/store/useStore';
 import {
     listScans, uploadScan, deleteScan,
     startAnalysis, getAnalysisStatus, getAnalysisResult,
-    getPointCloudData
+    getPointCloudData, analyseScan, pollScanStatus
 } from '@/lib/api';
 
 export default function ScanLibrary() {
@@ -19,6 +19,8 @@ export default function ScanLibrary() {
         setAnalysisResult, setAnalysisLoading, setAnalysisProgress,
         analysisLoading, analysisProgress, analysisMessage,
         triggerUpload, setTriggerUpload,
+        setAsmResult, setScanStatus, setUploadProgress: setStoreUploadProgress,
+        setError: setStoreError, setCurrentSiteId, warnings,
     } = useStore();
 
     const [searchQuery, setSearchQuery] = useState('');
@@ -26,6 +28,7 @@ export default function ScanLibrary() {
 
     const [uploadName, setUploadName] = useState('');
     const [uploadFile, setUploadFile] = useState(null);
+    const [siteId, setSiteId] = useState('HZL-Zawar');
     const [uploading, setUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
     const [error, setError] = useState('');
@@ -33,12 +36,7 @@ export default function ScanLibrary() {
     const [isDragging, setIsDragging] = useState(false);
     const [deleteConfirmId, setDeleteConfirmId] = useState(null);
 
-    // Load scans on mount
-    useEffect(() => {
-        fetchScans();
-    }, []);
-
-    const fetchScans = async () => {
+    const fetchScans = useCallback(async () => {
         try {
             setScanLoading(true);
             const data = await listScans();
@@ -56,10 +54,17 @@ export default function ScanLibrary() {
                 setTimeout(fetchScans, 2000);
             }
         }
-    };
+    }, [setScanLoading, setScans, scans.length, backendConnected]);
+
+    // Load scans on mount
+    useEffect(() => {
+        fetchScans();
+    }, [fetchScans]);
 
     const handleSelectScan = async (scanId) => {
         setSelectedScanId(scanId);
+        useStore.getState().setCurrentScanId(scanId); // Set ID for Potree viewer
+        useStore.getState().setPotreeOrigin(null); // Clear stale origin; Potree will report a new one after LAS loads
         setPointCloudLoading(true);
         const currentDensity = useStore.getState().pointDensity;
         try {
@@ -95,6 +100,7 @@ export default function ScanLibrary() {
         setError('');
         try {
             // Use XMLHttpRequest for upload progress tracking
+            const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
             const formData = new FormData();
             formData.append('file', uploadFile);
             formData.append('scan_name', uploadName);
@@ -102,7 +108,7 @@ export default function ScanLibrary() {
 
             const uploadResponse = await new Promise((resolve, reject) => {
                 const xhr = new XMLHttpRequest();
-                xhr.open('POST', 'http://localhost:8000/api/scans/upload');
+                xhr.open('POST', `${API_BASE}/api/scans/upload`);
                 xhr.upload.onprogress = (e) => {
                     if (e.lengthComputable) {
                         setUploadProgress(Math.round((e.loaded / e.total) * 100));
@@ -127,9 +133,22 @@ export default function ScanLibrary() {
             // Re-fetch scans to update list
             await fetchScans();
             
-            // Auto-select and auto-analyze the newly uploaded scan
+            // Auto-select and start BIMSu polling for the newly uploaded scan
             if (uploadResponse && uploadResponse.scan_id) {
                 handleSelectScan(uploadResponse.scan_id);
+                setCurrentSiteId(siteId);
+                setScanStatus('processing');
+                const cancelPoll = pollScanStatus(uploadResponse.scan_id, (statusObj) => {
+                    if (statusObj.status === 'complete' && statusObj.result) {
+                        setAsmResult(statusObj.result);
+                        cancelPoll();
+                        fetchScans();
+                    } else if (statusObj.status === 'failed') {
+                        setStoreError(statusObj.result?.error || 'Analysis failed');
+                        cancelPoll();
+                    }
+                });
+                // Also trigger old analysis flow for backward compat
                 handleStartAnalysis(uploadResponse.scan_id);
             }
             
@@ -256,6 +275,18 @@ export default function ScanLibrary() {
                     gap: 8
                 }}
             >
+                {/* Warnings banner */}
+                {warnings?.length > 0 && (
+                    <div style={{
+                        padding: '8px 12px', margin: '0 0 8px 0', borderRadius: 8,
+                        background: 'rgba(245, 158, 11, 0.1)',
+                        border: '1px solid rgba(245, 158, 11, 0.3)',
+                        fontSize: 11, color: '#f59e0b', fontWeight: 600,
+                    }}>
+                        ⚠ {warnings.length} warning{warnings.length > 1 ? 's' : ''}: {warnings[0]}
+                        {warnings.length > 1 && ` (+${warnings.length - 1} more)`}
+                    </div>
+                )}
                 {displayScans.map((scan, i) => (
                     <div
                         key={scan.scan_id || i}
@@ -448,11 +479,15 @@ function getDemoAnalysisResult() {
     };
 
     // Generate high-contrast set colorization for the point cloud
+    function hexToRgb(hex) {
+        const r = parseInt(hex.slice(1,3),16)/255;
+        const g = parseInt(hex.slice(3,5),16)/255;
+        const b = parseInt(hex.slice(5,7),16)/255;
+        return [r, g, b];
+    }
+
     const pc = result.point_cloud_data;
-    const setColorsRGB = sets.map(s => {
-        const c = new THREE.Color(s.color);
-        return [c.r, c.g, c.b];
-    });
+    const setColorsRGB = sets.map(s => hexToRgb(s.color));
     
     // Background color: Light gray for contrast (matches required output)
     const bgColor = [0.88, 0.88, 0.88]; // #e0e0e0 equivalent in 0-1 range

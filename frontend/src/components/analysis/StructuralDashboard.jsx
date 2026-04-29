@@ -4,30 +4,40 @@ import { useState, useMemo } from 'react';
 import {
     Table, BarChart3, AlertTriangle, Lightbulb,
     TrendingUp, ChevronDown, ChevronUp, Shield,
-    Target, Zap, ChevronRight, ChevronLeft, Layers
+    Target, Zap, ChevronRight, ChevronLeft, Layers,
+    Download, FileText, Image as ImageIcon, CheckCircle2,
+    Activity, Database, Crosshair, GitBranch
 } from 'lucide-react';
 import useStore from '@/store/useStore';
 import dynamic from 'next/dynamic';
+import StabilitySummary from './StabilitySummary';
+import { downloadReport } from '@/lib/api';
 
 // Dynamically import charts (avoid SSR issues with Chart.js)
 const Charts = dynamic(() => import('./Charts'), { ssr: false });
 
 export default function StructuralDashboard() {
     const {
-        analysisResult, rightPanelTab, setRightPanelTab,
+        analysisResult, asmResult, rightPanelTab, setRightPanelTab,
         selectedPlaneId, setSelectedPlaneId, visibleSets,
-        dashboardCollapsed, setDashboardCollapsed
+        dashboardCollapsed, setDashboardCollapsed, selectedScanId
     } = useStore();
 
-    if (!analysisResult) return null;
+    const activeResult = asmResult || analysisResult;
+    if (!activeResult) return null;
 
-    const { planes = [], sets = [], insights = [], processing_time = 0 } = analysisResult || {};
+    const planes = activeResult?.planes || [];
+    const sets = asmResult?.joint_sets || analysisResult?.sets || [];
+    const insights = analysisResult?.insights || [];
+    const processing_time = activeResult?.processing_time || 0;
 
     const tabs = [
+        { id: 'pipeline', label: 'Pipeline', icon: GitBranch },
         { id: 'planes', label: 'Planes', icon: Table, count: planes.length },
         { id: 'sets', label: 'Sets', icon: Layers, count: sets.length },
         { id: 'insights', label: 'Insights', icon: Lightbulb, count: insights.length },
         { id: 'charts', label: 'Charts', icon: BarChart3 },
+        { id: 'summary', label: 'Summary', icon: Activity },
     ];
 
     if (dashboardCollapsed) {
@@ -122,6 +132,9 @@ export default function StructuralDashboard() {
 
             {/* Tab content */}
             <div style={{ flex: 1, overflow: 'auto', padding: '0' }}>
+                {rightPanelTab === 'pipeline' && (
+                    <PipelineTab scanId={selectedScanId} />
+                )}
                 {rightPanelTab === 'planes' && (
                     <PlanesTab planes={planes} selectedId={selectedPlaneId} onSelect={setSelectedPlaneId} />
                 )}
@@ -134,18 +147,9 @@ export default function StructuralDashboard() {
                 {rightPanelTab === 'charts' && (
                     <ChartsTab planes={planes} sets={sets} />
                 )}
+                {rightPanelTab === 'summary' && <StabilitySummary />}
             </div>
         </div>
-    );
-}
-
-
-function Layers2Icon(props) {
-    return (
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
-            strokeLinecap="round" strokeLinejoin="round" {...props} width={props.size} height={props.size}>
-            <path d="m12 2 10 6.5-10 6.5L2 8.5z" /><path d="m2 15.5 10 6.5 10-6.5" />
-        </svg>
     );
 }
 
@@ -164,6 +168,185 @@ function StatBox({ label, value, color }) {
 }
 
 
+/* ===================================================================
+ *  PIPELINE TAB — Shows all 4 analysis phases + download actions
+ * =================================================================== */
+function PipelineTab({ scanId }) {
+    const { asmResult, analysisResult } = useStore();
+    const result = asmResult || analysisResult;
+    const [downloading, setDownloading] = useState(null);
+
+    const handleDownload = async (type) => {
+        if (!scanId) return;
+        setDownloading(type);
+        try {
+            switch (type) {
+                case 'report_pdf':
+                    await downloadReport(scanId);
+                    break;
+                // Add more cases if needed
+            }
+        } catch (e) {
+            console.warn(`Download failed:`, e.message);
+        } finally {
+            setDownloading(null);
+        }
+    };
+
+    const planesCount = asmResult?.planes_detected ?? analysisResult?.num_planes ?? 0;
+    const setsCount = asmResult?.joint_sets?.length ?? analysisResult?.num_sets ?? 0;
+    const insightsCount = analysisResult?.insights?.length ?? 0;
+
+    const phases = [
+        {
+            id: 1, 
+            name: 'Point Cloud Loading & Preprocessing',
+            icon: Database,
+            color: '#3b82f6',
+            detail: result?.point_cloud_data 
+                ? `${result.point_cloud_data.num_points?.toLocaleString()} points processed`
+                : (asmResult?.point_count_processed ? `${asmResult.point_count_processed.toLocaleString()} points processed` : 'Completed'),
+            status: 'completed',
+        },
+        {
+            id: 2, 
+            name: 'Plane Detection (RANSAC)',
+            icon: Crosshair,
+            color: '#f59e0b',
+            detail: `${planesCount} planes detected`,
+            status: 'completed',
+        },
+        {
+            id: 3, 
+            name: 'Orientation & Set Clustering',
+            icon: Layers,
+            color: '#22c55e',
+            detail: `${setsCount} discontinuity sets`,
+            status: 'completed',
+        },
+        {
+            id: 4, 
+            name: 'Insights & Export Generation',
+            icon: Lightbulb,
+            color: '#a855f7',
+            detail: `${insightsCount} insights generated`,
+            status: 'completed',
+        },
+    ];
+
+    return (
+        <div style={{ padding: 12 }}>
+            {/* Pipeline Phase Tracker */}
+            <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Analysis Pipeline — 4 Phases
+                </div>
+                {phases.map((phase, idx) => (
+                    <div key={phase.id} style={{ display: 'flex', gap: 10, marginBottom: idx < phases.length - 1 ? 0 : 0 }}>
+                        {/* Vertical connector line */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 24 }}>
+                            <div style={{
+                                width: 24, height: 24, borderRadius: '50%',
+                                background: `${phase.color}22`, border: `2px solid ${phase.color}`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                flexShrink: 0,
+                            }}>
+                                <CheckCircle2 size={12} color={phase.color} />
+                            </div>
+                            {idx < phases.length - 1 && (
+                                <div style={{ width: 2, flex: 1, minHeight: 14, background: 'var(--border-color)' }} />
+                            )}
+                        </div>
+                        {/* Phase info */}
+                        <div style={{ flex: 1, paddingBottom: idx < phases.length - 1 ? 10 : 0 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.3 }}>
+                                {phase.name}
+                            </div>
+                            <div style={{ fontSize: 10, color: phase.color, fontWeight: 600 }}>
+                                {phase.detail}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            {/* Processing Summary */}
+            <div className="glass-card" style={{ padding: 12, marginBottom: 14 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase' }}>
+                    Processing Summary
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <SummaryItem label="Total Time" value={`${result?.processing_time?.toFixed(1) ?? '—'}s`} />
+                    <SummaryItem label="Planes" value={planesCount} />
+                    <SummaryItem label="Sets" value={setsCount} />
+                    <SummaryItem label="Insights" value={insightsCount} />
+                </div>
+            </div>
+
+            {/* Backend Stereonet Image (Phase 4 output) */}
+            {analysisResult?.stereonet_b64 && (
+                <div className="glass-card" style={{ padding: 12, marginBottom: 14 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase' }}>
+                        Stereonet (Schmidt Projection)
+                    </div>
+                    <div style={{ borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+                        <img
+                            src={`data:image/png;base64,${analysisResult.stereonet_b64}`}
+                            alt="Schmidt Equal-Area Stereonet"
+                            style={{ width: '100%', height: 'auto', display: 'block', background: '#fff' }}
+                        />
+                    </div>
+                    <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 4, textAlign: 'center' }}>
+                        Generated by mplstereonet — Lower Hemisphere Equal-Area
+                    </div>
+                </div>
+            )}
+
+            {/* Export Phase Outputs */}
+            <div className="glass-card" style={{ padding: 12, marginBottom: 14 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase' }}>
+                    Export Phase Outputs
+                </div>
+                <button
+                    onClick={() => handleDownload('report_pdf')}
+                    disabled={downloading === 'report_pdf'}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        width: '100%', padding: '10px 12px',
+                        background: 'rgba(99, 102, 241, 0.1)',
+                        border: '1px solid rgba(99, 102, 241, 0.3)',
+                        borderRadius: 8, cursor: 'pointer',
+                        color: 'var(--text-primary)', textAlign: 'left',
+                        marginBottom: 8, transition: 'all 0.2s',
+                    }}
+                >
+                    <div style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(99, 102, 241, 0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        {downloading === 'report_pdf' ? <Activity size={16} color="#6366f1" className="animate-spin" /> : <Download size={16} color="#6366f1" />}
+                    </div>
+                    <div>
+                        <div style={{ fontSize: 12, fontWeight: 700 }}>Download Geotechnical Report</div>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Full PDF — ready for engineering review</div>
+                    </div>
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function SummaryItem({ label, value }) {
+    return (
+        <div style={{
+            background: 'var(--bg-primary)', borderRadius: 6, padding: '6px 10px',
+        }}>
+            <div style={{ fontSize: 9, color: 'var(--text-muted)', marginBottom: 2 }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>{value}</div>
+        </div>
+    );
+}
+
+/* ===================================================================
+ *  PLANES TAB
+ * =================================================================== */
 function PlanesTab({ planes, selectedId, onSelect }) {
     const [sortBy, setSortBy] = useState('id');
     const [sortDir, setSortDir] = useState('asc');
@@ -182,7 +365,7 @@ function PlanesTab({ planes, selectedId, onSelect }) {
         else { setSortBy(col); setSortDir('asc'); }
     };
 
-    const SortIcon = ({ col }) => {
+    const renderSortIcon = (col) => {
         if (sortBy !== col) return null;
         return sortDir === 'asc' ? <ChevronUp size={10} /> : <ChevronDown size={10} />;
     };
@@ -193,22 +376,22 @@ function PlanesTab({ planes, selectedId, onSelect }) {
                 <thead>
                     <tr>
                         <th onClick={() => toggleSort('id')} style={{ cursor: 'pointer' }}>
-                            ID <SortIcon col="id" />
+                            ID {renderSortIcon('id')}
                         </th>
                         <th onClick={() => toggleSort('set_id')} style={{ cursor: 'pointer' }}>
-                            Set <SortIcon col="set_id" />
+                            Set {renderSortIcon('set_id')}
                         </th>
                         <th onClick={() => toggleSort('dip')} style={{ cursor: 'pointer' }}>
-                            Dip <SortIcon col="dip" />
+                            Dip {renderSortIcon('dip')}
                         </th>
                         <th onClick={() => toggleSort('dip_direction')} style={{ cursor: 'pointer' }}>
-                            Dip Dir <SortIcon col="dip_direction" />
+                            Dip Dir {renderSortIcon('dip_direction')}
                         </th>
                         <th onClick={() => toggleSort('strike')} style={{ cursor: 'pointer' }}>
-                            Strike <SortIcon col="strike" />
+                            Strike {renderSortIcon('strike')}
                         </th>
                         <th onClick={() => toggleSort('area')} style={{ cursor: 'pointer' }}>
-                            Area <SortIcon col="area" />
+                            Area {renderSortIcon('area')}
                         </th>
                         <th>Conf.</th>
                     </tr>
@@ -287,6 +470,9 @@ function Detail({ label, value }) {
 }
 
 
+/* ===================================================================
+ *  SETS TAB — Now displays Fisher K values from Phase 3
+ * =================================================================== */
 function SetsTab({ sets }) {
     if (!sets?.length) return <EmptyState text="No discontinuity sets found" />;
 
@@ -302,7 +488,7 @@ function SetsTab({ sets }) {
                             <span className="color-dot" style={{ background: s.color, width: 14, height: 14 }} />
                             <span style={{ fontSize: 14, fontWeight: 700 }}>{s.name}</span>
                         </div>
-                        <span className="badge badge-info">{s.num_planes} planes</span>
+                        <span className="badge badge-info">{s.plane_count ?? s.num_planes ?? 0} planes</span>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
@@ -311,17 +497,87 @@ function SetsTab({ sets }) {
                         <OrientationBox label="Strike" value={`${s.mean_strike?.toFixed(1)}°`} />
                     </div>
 
+                    {/* Fisher K-value display — Phase 3 integration */}
+                    {s.fisher_k !== null && s.fisher_k !== undefined && (
+                        <div style={{
+                            marginTop: 8, padding: '8px 10px', borderRadius: 8,
+                            background: getFisherKBackground(s.fisher_k_label),
+                            border: `1px solid ${getFisherKBorderColor(s.fisher_k_label)}`,
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <Target size={13} color={getFisherKColor(s.fisher_k_label)} />
+                                <div>
+                                    <div style={{ fontSize: 10, fontWeight: 700, color: getFisherKColor(s.fisher_k_label) }}>
+                                        Fisher K = {s.fisher_k?.toFixed(1)}
+                                    </div>
+                                    <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+                                        Concentration: {s.fisher_k_label ? s.fisher_k_label.charAt(0).toUpperCase() + s.fisher_k_label.slice(1) : 'N/A'}
+                                    </div>
+                                </div>
+                            </div>
+                            <FisherKBadge label={s.fisher_k_label} />
+                        </div>
+                    )}
+                    {(s.fisher_k === null || s.fisher_k === undefined) && (
+                        <div style={{
+                            marginTop: 8, padding: '6px 10px', borderRadius: 8,
+                            background: 'rgba(255,255,255,0.02)',
+                            border: '1px solid var(--border-color)',
+                            fontSize: 9, color: 'var(--text-muted)', textAlign: 'center',
+                        }}>
+                            Fisher K: Insufficient planes (need ≥ 3)
+                        </div>
+                    )}
+
                     <div style={{
                         marginTop: 8, fontSize: 11, color: 'var(--text-muted)',
                         display: 'flex', justifyContent: 'space-between',
                     }}>
-                        <span>Total points: {s.total_points?.toLocaleString()}</span>
+                        <span>Persistence: {s.persistence_m != null ? `${s.persistence_m.toFixed(2)}m` : (s.total_points ? s.total_points.toLocaleString() + ' pts' : '—')}</span>
                     </div>
                 </div>
             ))}
         </div>
     );
 }
+
+/* Fisher K helpers */
+function getFisherKColor(label) {
+    if (label === 'strong') return '#22c55e';
+    if (label === 'moderate') return '#f59e0b';
+    if (label === 'dispersed') return '#ef4444';
+    return 'var(--text-muted)';
+}
+
+function getFisherKBackground(label) {
+    if (label === 'strong') return 'rgba(34, 197, 94, 0.08)';
+    if (label === 'moderate') return 'rgba(245, 158, 11, 0.08)';
+    if (label === 'dispersed') return 'rgba(239, 68, 68, 0.08)';
+    return 'rgba(255,255,255,0.02)';
+}
+
+function getFisherKBorderColor(label) {
+    if (label === 'strong') return 'rgba(34, 197, 94, 0.2)';
+    if (label === 'moderate') return 'rgba(245, 158, 11, 0.2)';
+    if (label === 'dispersed') return 'rgba(239, 68, 68, 0.2)';
+    return 'var(--border-color)';
+}
+
+function FisherKBadge({ label }) {
+    const color = getFisherKColor(label);
+    const text = label ? label.toUpperCase() : 'N/A';
+    return (
+        <span style={{
+            fontSize: 8, fontWeight: 800, color: color,
+            padding: '2px 6px', borderRadius: 4,
+            background: `${color}22`, letterSpacing: 0.5,
+        }}>
+            {text}
+        </span>
+    );
+}
+
 
 function OrientationBox({ label, value, sub }) {
     return (

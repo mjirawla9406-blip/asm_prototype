@@ -9,6 +9,9 @@ import struct
 
 logger = logging.getLogger(__name__)
 
+REQUIRE_GEOREF = False  # Set True in production to enforce CRS check
+MIN_POINT_DENSITY_PER_M2 = 50  # Minimum points per square metre on stope walls
+
 
 class PointCloudLoader:
     """Load point cloud files in various formats and convert to numpy arrays."""
@@ -46,6 +49,20 @@ class PointCloudLoader:
             raise ValueError(f"Unsupported format: {ext}")
 
     @staticmethod
+    def _check_georef(header) -> bool:
+        """Return True if the LAS header contains any CRS/georef VLR records."""
+        try:
+            vlrs = header.vlrs if hasattr(header, 'vlrs') else []
+            crs_user_ids = {"LASF_Projection", "liblas", "GDAL_OGR_EVEN"}
+            for vlr in vlrs:
+                uid = getattr(vlr, 'user_id', '') or ''
+                if any(crs in uid for crs in crs_user_ids):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
     def _load_las(filepath: Path) -> tuple[np.ndarray, dict]:
         """Load LAS/LAZ format point cloud incrementally and downsample if large."""
         import laspy
@@ -57,6 +74,12 @@ class PointCloudLoader:
             total_points = header.point_count
 
             skip = max(1, total_points // target_points)
+
+            if REQUIRE_GEOREF and not PointCloudLoader._check_georef(header):
+                raise ValueError(
+                    "LAS file has no georeferencing (CRS/VLR metadata missing). "
+                    "Ensure the file is georeferenced with ground control points before processing."
+                )
 
             points_list = []
             colors_list = []
@@ -208,6 +231,20 @@ class PointCloudLoader:
 
         quality = max(0, min(100, 100 - (nan_count / max(1, len(points))) * 100))
 
+        # Density guard
+        if len(points) > 0:
+            bounds_ptp = np.ptp(points, axis=0)
+            # Estimate surface area as 2*(XZ + YZ) faces (dominant stope wall surfaces)
+            surface_area_est = 2 * (
+                bounds_ptp[0] * bounds_ptp[2] + bounds_ptp[1] * bounds_ptp[2]
+            )
+            surface_area_est = max(surface_area_est, 1.0)
+            density_per_m2 = len(points) / surface_area_est
+        else:
+            density_per_m2 = 0.0
+
+        density_ok = density_per_m2 >= MIN_POINT_DENSITY_PER_M2
+
         return {
             'valid': nan_count == 0,
             'nan_count': nan_count,
@@ -215,4 +252,6 @@ class PointCloudLoader:
             'centroid': centroid.tolist(),
             'mean_spacing': mean_spacing,
             'quality': round(quality, 1),
+            'density_per_m2': round(density_per_m2, 2),
+            'density_ok': density_ok,
         }

@@ -121,6 +121,52 @@ def run_structural_mapping(
         from services.insights_engine import InsightsEngine
         insights = InsightsEngine.generate_insights(planes, set_info)
 
+        # Step 6b: Compute Fisher K-value per joint set
+        set_info = InsightsEngine.compute_fisher_k(planes, set_info, labels)
+        logger.info("Fisher K-values computed for all sets")
+
+        # Step 6c: Generate stereonet (base64 for API response)
+        stereonet_b64 = None
+        try:
+            from services.stereonet_renderer import render_stereonet_base64, render_stereonet
+            # Attach per-plane orientation data to each set for the renderer
+            enriched_sets = []
+            for s in set_info:
+                s_copy = dict(s)
+                set_planes = [
+                    {'dip': p.get('dip', 0), 'dip_direction': p.get('dip_direction', 0)}
+                    for p, lbl in zip(planes, labels)
+                    if int(lbl) == s['set_id']
+                ]
+                s_copy['planes'] = set_planes
+                enriched_sets.append(s_copy)
+            stereonet_b64 = render_stereonet_base64(enriched_sets)
+            # Also save a PNG alongside the result JSON
+            stereo_dir = RESULTS_DIR / scan_id
+            stereo_dir.mkdir(parents=True, exist_ok=True)
+            stereonet_path = str(stereo_dir / "stereonet.png")
+            render_stereonet(enriched_sets, stereonet_path, fmt="png")
+            logger.info("Stereonet generated successfully")
+        except Exception as e:
+            logger.warning(f"Stereonet generation failed (non-fatal): {e}")
+
+        # Step 6d: Export classified LAS
+        classified_las_path = None
+        try:
+            result_dir_cls = RESULTS_DIR / scan_id
+            result_dir_cls.mkdir(parents=True, exist_ok=True)
+            cls_output = str(result_dir_cls / "classified.las")
+            classified_las_path = InsightsEngine.export_classified_las(
+                planes=planes,
+                labels=[int(l) for l in labels],
+                source_points=points_clean,
+                output_path=cls_output,
+                set_colors=set_colors,
+            )
+            logger.info(f"Classified LAS exported to {classified_las_path}")
+        except Exception as e:
+            logger.warning(f"Classified LAS export failed (non-fatal): {e}")
+
         # Step 7: Prepare visualization data (downsampled for frontend)
         viz_max = 50000
         if len(points_clean) > viz_max:
@@ -147,13 +193,23 @@ def run_structural_mapping(
                     point_to_set[idx] = color
 
         # Color the visualization points (height gradient for original, set colors for analyzed)
-        # Use a neutral very light gray base for both modes
-        viz_colors = [[0.95, 0.95, 0.95]] * len(viz_scaled)
+        z_vals = viz_scaled[:, 2]
+        z_min, z_max = z_vals.min(), z_vals.max()
+        z_range = max(z_max - z_min, 1e-6)
+        z_norm = (z_vals - z_min) / z_range
+
+        viz_colors = []
+        for t in z_norm:
+            r = 0.8 + 0.2 * t
+            g = 0.3 + 0.3 * t
+            b = 0.1 + 0.1 * (1 - t)
+            viz_colors.append([round(float(r), 3), round(float(g), 3), round(float(b), 3)])
         
         # Set colors (hex to RGB)
         viz_set_colors = []
         for idx in viz_indices:
-            hex_color = point_to_set.get(idx, '#e0e0e0')
+            # Use #444444 for unassigned points so they don't drown out colored planes
+            hex_color = point_to_set.get(idx, '#444444')
             # Manual hex to rgb conversion to avoid library dependencies
             h = hex_color.lstrip('#')
             rgb = [int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4)]
@@ -217,6 +273,8 @@ def run_structural_mapping(
                 "centroid": [float(c) for c in centroid],
             },
             "processing_time": processing_time,
+            "stereonet_b64": stereonet_b64,
+            "classified_las_path": classified_las_path,
         }
 
         with open(result_path, 'w') as f:
@@ -340,3 +398,63 @@ async def get_insights(scan_id: str):
         data = json.load(f)
 
     return {"insights": data.get("insights", [])}
+
+
+@router.get("/{scan_id}/classified-las")
+async def get_classified_las(scan_id: str):
+    """Download the classified LAS file for a completed analysis."""
+    from fastapi.responses import FileResponse
+    las_path = RESULTS_DIR / scan_id / "classified.las"
+    if not las_path.exists():
+        raise HTTPException(status_code=404, detail="Classified LAS not found")
+    return FileResponse(
+        str(las_path),
+        media_type="application/octet-stream",
+        filename=f"ASM_{scan_id}_classified.las",
+    )
+
+
+@router.get("/{scan_id}/stereonet")
+async def get_stereonet(scan_id: str):
+    """Download the stereonet PNG for a completed analysis."""
+    from fastapi.responses import FileResponse
+    stereonet_path = RESULTS_DIR / scan_id / "stereonet.png"
+    if not stereonet_path.exists():
+        raise HTTPException(status_code=404, detail="Stereonet image not found")
+    return FileResponse(
+        str(stereonet_path),
+        media_type="image/png",
+        filename=f"ASM_{scan_id}_stereonet.png",
+    )
+
+
+@router.get("/{scan_id}/pipeline-info")
+async def get_pipeline_info(scan_id: str):
+    """Get pipeline phase details for a completed analysis."""
+    result_path = RESULTS_DIR / scan_id / "analysis_result.json"
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="No analysis results found")
+
+    with open(result_path, 'r') as f:
+        data = json.load(f)
+
+    # Determine which outputs exist
+    has_stereonet = (RESULTS_DIR / scan_id / "stereonet.png").exists()
+    has_classified_las = (RESULTS_DIR / scan_id / "classified.las").exists()
+
+    return {
+        "scan_id": scan_id,
+        "processing_time": data.get("processing_time", 0),
+        "num_planes": data.get("num_planes", 0),
+        "num_sets": data.get("num_sets", 0),
+        "has_stereonet": has_stereonet,
+        "has_stereonet_b64": bool(data.get("stereonet_b64")),
+        "has_classified_las": has_classified_las,
+        "classified_las_path": data.get("classified_las_path"),
+        "phases": [
+            {"id": 1, "name": "Point Cloud Loading & Preprocessing", "status": "completed"},
+            {"id": 2, "name": "Plane Detection (RANSAC)", "status": "completed", "detail": f"{data.get('num_planes', 0)} planes detected"},
+            {"id": 3, "name": "Orientation & Set Clustering", "status": "completed", "detail": f"{data.get('num_sets', 0)} discontinuity sets"},
+            {"id": 4, "name": "Insights & Export Generation", "status": "completed", "detail": f"{len(data.get('insights', []))} insights generated"},
+        ],
+    }

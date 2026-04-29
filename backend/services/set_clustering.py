@@ -1,7 +1,7 @@
 """
 Discontinuity Set Clustering Service.
 Groups detected planes into structural discontinuity sets
-using DBSCAN on normal vectors in stereographic space.
+using cyclic orientation transformation and Agglomerative Clustering.
 """
 import numpy as np
 import logging
@@ -9,7 +9,7 @@ from typing import List, Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Color palette for up to 6 discontinuity sets
+# Color palette for up to 8 discontinuity sets
 SET_COLORS = [
     "#FF4444",  # Red - Set 1
     "#4488FF",  # Blue - Set 2
@@ -39,13 +39,64 @@ class SetClusterer:
     def __init__(self, eps: float = 0.15, min_samples: int = 2, max_sets: int = 6):
         """
         Args:
-            eps: DBSCAN epsilon (angular distance in radians)
+            eps: DBSCAN epsilon (angular distance in radians) — used only for fallback
             min_samples: Minimum planes per cluster
-            max_sets: Maximum number of discontinuity sets to identify
+            max_sets: Maximum number of discontinuity sets (retained for API compat, not enforced)
         """
         self.eps = eps
         self.min_samples = min_samples
         self.max_sets = max_sets
+
+    # ------------------------------------------------------------------ #
+    # Cyclic transformation helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def cyclic_transform(dip: float, dip_dir: float) -> Tuple[float, float, float]:
+        """
+        Convert (dip, dip_direction) to a Cartesian unit vector that lives
+        on the unit sphere. This eliminates the angular wrap-around problem:
+        orientations at 358° and 2° map to nearby Cartesian points, so
+        Euclidean distance in this space faithfully represents angular
+        proximity.  Without this transform, 358° and 2° would appear
+        356° apart when differenced naively.
+
+        Args:
+            dip: Dip angle in degrees
+            dip_dir: Dip direction in degrees
+
+        Returns:
+            (x, y, z) unit-vector coordinates
+        """
+        dd_rad = np.radians(dip_dir)
+        d_rad = np.radians(dip)
+        x = np.sin(d_rad) * np.sin(dd_rad)
+        y = np.sin(d_rad) * np.cos(dd_rad)
+        z = np.cos(d_rad)
+        return x, y, z
+
+    @staticmethod
+    def normals_to_orientations(normals: np.ndarray) -> List[Dict[str, float]]:
+        """
+        Convert an array of unit normal vectors to (dip, dip_direction) pairs.
+
+        Args:
+            normals: Array of shape (N, 3), unit normal vectors
+
+        Returns:
+            List of dicts with 'dip' and 'dip_direction' keys
+        """
+        from services.orientation_calculator import OrientationCalculator
+
+        orientations = []
+        for n in normals:
+            ori = OrientationCalculator.normal_to_orientation(n)
+            orientations.append(ori)
+        return orientations
+
+    # ------------------------------------------------------------------ #
+    # Main clustering entry point
+    # ------------------------------------------------------------------ #
 
     def cluster_planes(self, planes: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
         """
@@ -64,9 +115,9 @@ class SetClusterer:
             set_info = self._build_set_info(planes, labels)
             return labels, set_info
 
-        logger.info(f"Clustering {len(planes)} planes with DBSCAN (eps={self.eps})")
+        logger.info(f"Clustering {len(planes)} planes with AgglomerativeClustering")
 
-        # Extract and normalize normals
+        # Extract and normalise normals
         normals = np.array([p['normal'] for p in planes])
         for i in range(len(normals)):
             mag = np.linalg.norm(normals[i])
@@ -76,29 +127,51 @@ class SetClusterer:
             if normals[i][2] < 0:
                 normals[i] = -normals[i]
 
-        # Compute angular distance matrix
-        distance_matrix = self._compute_angular_distance_matrix(normals)
+        # Convert normals → orientations → cyclic Cartesian features
+        orientations = self.normals_to_orientations(normals)
+        features = np.array([
+            self.cyclic_transform(o['dip'], o['dip_direction'])
+            for o in orientations
+        ])  # shape (N, 3)
 
-        # DBSCAN clustering
+        # Standardise features before clustering
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+
+        # Primary path: AgglomerativeClustering with automatic set count
         try:
-            from sklearn.cluster import DBSCAN
-            clustering = DBSCAN(
-                eps=self.eps,
-                min_samples=self.min_samples,
-                metric='precomputed'
-            ).fit(distance_matrix)
-            labels = clustering.labels_
+            from sklearn.cluster import AgglomerativeClustering
+
+            clustering = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=0.3,
+                linkage='ward',
+            )
+            labels = clustering.fit_predict(features_scaled)
+
         except ImportError:
-            logger.warning("scikit-learn not available, using simple clustering")
-            labels = self._simple_clustering(normals)
+            # Fallback: DBSCAN on precomputed angular distance matrix
+            logger.warning("AgglomerativeClustering unavailable, falling back to DBSCAN")
+            try:
+                from sklearn.cluster import DBSCAN
+
+                distance_matrix = self._compute_angular_distance_matrix(normals)
+                clustering = DBSCAN(
+                    eps=self.eps,
+                    min_samples=self.min_samples,
+                    metric='precomputed',
+                ).fit(distance_matrix)
+                labels = clustering.labels_
+            except ImportError:
+                logger.warning("scikit-learn not available, using simple clustering")
+                labels = self._simple_clustering(normals)
 
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         n_noise = np.sum(labels == -1)
 
-        # If too many clusters, merge similar ones
-        if n_clusters > self.max_sets:
-            labels = self._merge_clusters(normals, labels, self.max_sets)
-            n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+        # NOTE: No _merge_clusters() call — number of joint sets is determined
+        # automatically by the distance_threshold parameter.
 
         # Assign noise points to nearest cluster
         if n_noise > 0 and n_clusters > 0:
@@ -119,6 +192,10 @@ class SetClusterer:
         set_info = self._build_set_info(planes, labels)
 
         return labels, set_info
+
+    # ------------------------------------------------------------------ #
+    # Distance / fallback helpers (kept for DBSCAN fallback path)
+    # ------------------------------------------------------------------ #
 
     def _compute_angular_distance_matrix(self, normals: np.ndarray) -> np.ndarray:
         """Compute pairwise angular distances between normal vectors."""
@@ -154,7 +231,8 @@ class SetClusterer:
     def _merge_clusters(
         self, normals: np.ndarray, labels: np.ndarray, max_clusters: int
     ) -> np.ndarray:
-        """Merge similar clusters until max_clusters is reached."""
+        """Merge similar clusters until max_clusters is reached.
+        Retained for backward compatibility but no longer called in the main path."""
         unique = [l for l in set(labels) if l >= 0]
 
         while len(unique) > max_clusters:
@@ -183,6 +261,10 @@ class SetClusterer:
             unique.remove(merge_pair[1])
 
         return labels
+
+    # ------------------------------------------------------------------ #
+    # Noise assignment
+    # ------------------------------------------------------------------ #
 
     def _assign_noise(self, normals: np.ndarray, labels: np.ndarray) -> np.ndarray:
         """Assign noise points to the nearest cluster."""
@@ -215,6 +297,10 @@ class SetClusterer:
             labels[i] = best_label
 
         return labels
+
+    # ------------------------------------------------------------------ #
+    # Set info builder
+    # ------------------------------------------------------------------ #
 
     def _build_set_info(self, planes: List[Dict], labels: np.ndarray) -> List[Dict]:
         """Build discontinuity set metadata."""

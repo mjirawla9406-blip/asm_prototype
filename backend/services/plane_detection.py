@@ -1,6 +1,7 @@
 """
 Plane Detection Service.
-Uses iterative RANSAC to detect discontinuity planes in point clouds.
+Uses iterative RANSAC followed by planar-patch refinement
+to detect discontinuity planes in point clouds.
 """
 import numpy as np
 import logging
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class PlaneDetector:
-    """Detect structural discontinuity planes using RANSAC segmentation."""
+    """Detect structural discontinuity planes using RANSAC + planar-patch segmentation."""
 
     def __init__(
         self,
@@ -59,13 +60,16 @@ class PlaneDetector:
             return self._detect_with_numpy(points, max_planes)
 
     def _detect_with_open3d(self, points: np.ndarray, max_planes: int) -> List[Dict]:
-        """Detect planes using Open3D's optimized RANSAC."""
+        """Detect planes using Open3D's optimized RANSAC + planar-patch second pass."""
         import open3d as o3d
 
         all_planes = []
         remaining_indices = np.arange(len(points))
         remaining_points = points.copy()
 
+        # ============================================================
+        # Pass 1: Iterative RANSAC (existing, unchanged)
+        # ============================================================
         for plane_idx in range(max_planes):
             if len(remaining_points) < self.min_inliers:
                 logger.info(f"Too few remaining points ({len(remaining_points)}), stopping")
@@ -142,7 +146,109 @@ class PlaneDetector:
             remaining_points = remaining_points[mask]
             remaining_indices = remaining_indices[mask]
 
-        logger.info(f"Detected {len(all_planes)} planes total")
+        ransac_count = len(all_planes)
+        logger.info(f"RANSAC pass detected {ransac_count} planes")
+
+        # ============================================================
+        # Pass 2: Planar-patch refinement on leftover points
+        # ============================================================
+        try:
+            if len(remaining_points) >= self.min_inliers:
+                rest_pcd = o3d.geometry.PointCloud()
+                rest_pcd.points = o3d.utility.Vector3dVector(remaining_points)
+                rest_pcd.estimate_normals(
+                    search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30)
+                )
+
+                patches = rest_pcd.detect_planar_patches(
+                    normal_variance_threshold_deg=25,
+                    coplanarity_deg=75,
+                    outlier_ratio=0.75,
+                    min_plane_edge_length=0.5,
+                )
+
+                patch_planes = []
+                for patch in patches:
+                    try:
+                        # Extract plane model from the OrientedBoundingBox
+                        center = np.asarray(patch.center)
+                        R = np.asarray(patch.R)
+                        # The normal of the planar patch is the third column of the rotation matrix
+                        patch_normal = R[:, 2].copy()
+                        patch_normal_mag = np.linalg.norm(patch_normal)
+                        if patch_normal_mag > 0:
+                            patch_normal = patch_normal / patch_normal_mag
+
+                        # Find inlier points: points close to the patch plane
+                        d_offset = -np.dot(patch_normal, center)
+                        dists = np.abs(np.dot(remaining_points, patch_normal) + d_offset)
+                        patch_inliers = np.where(dists <= self.distance_threshold * 2)[0]
+
+                        # Also restrict to points within the bounding box extent
+                        extent = np.asarray(patch.extent)
+                        local_pts = remaining_points[patch_inliers] - center
+                        local_coords = local_pts @ R  # project onto local axes
+                        within = (
+                            (np.abs(local_coords[:, 0]) <= extent[0] / 2 + self.distance_threshold) &
+                            (np.abs(local_coords[:, 1]) <= extent[1] / 2 + self.distance_threshold) &
+                            (np.abs(local_coords[:, 2]) <= extent[2] / 2 + self.distance_threshold)
+                        )
+                        patch_inliers = patch_inliers[within]
+
+                        if len(patch_inliers) < self.min_inliers:
+                            continue
+
+                        inlier_pts = remaining_points[patch_inliers]
+                        orig_idx = remaining_indices[patch_inliers]
+                        centroid = np.mean(inlier_pts, axis=0)
+                        area = self._estimate_plane_area(inlier_pts, patch_normal)
+
+                        patch_planes.append({
+                            'id': -1,  # will be re-assigned
+                            'normal': patch_normal.tolist(),
+                            'offset': float(d_offset),
+                            'inlier_indices': orig_idx.tolist(),
+                            'inlier_points': inlier_pts.tolist(),
+                            'centroid': centroid.tolist(),
+                            'area': float(area),
+                            'num_points': len(patch_inliers),
+                            'confidence': 0.75,
+                        })
+                    except Exception as patch_err:
+                        logger.debug(f"Skipping patch: {patch_err}")
+                        continue
+
+                logger.info(f"Planar-patch pass found {len(patch_planes)} candidate planes")
+
+                # Deduplicate: keep plane with more inliers when normal < 5°
+                # AND centroid < 2m apart
+                for pp in patch_planes:
+                    duplicate = False
+                    pp_normal = np.array(pp['normal'])
+                    pp_centroid = np.array(pp['centroid'])
+                    for existing in all_planes:
+                        ex_normal = np.array(existing['normal'])
+                        ex_centroid = np.array(existing['centroid'])
+                        cos_angle = np.clip(abs(np.dot(pp_normal, ex_normal)), -1.0, 1.0)
+                        angle_deg = np.degrees(np.arccos(cos_angle))
+                        dist = np.linalg.norm(pp_centroid - ex_centroid)
+                        if angle_deg < 5.0 and dist < 2.0:
+                            # Keep whichever has more inliers
+                            if pp['num_points'] > existing['num_points']:
+                                existing.update(pp)
+                            duplicate = True
+                            break
+                    if not duplicate:
+                        all_planes.append(pp)
+
+        except Exception as e:
+            logger.warning(f"Planar-patch second pass failed ({e}), continuing with RANSAC results only")
+
+        # Assign sequential IDs to all merged planes
+        for idx, plane in enumerate(all_planes):
+            plane['id'] = idx
+
+        logger.info(f"Detected {len(all_planes)} planes total (RANSAC: {ransac_count}, patches: {len(all_planes) - ransac_count})")
         return all_planes
 
     def _detect_with_numpy(self, points: np.ndarray, max_planes: int) -> List[Dict]:

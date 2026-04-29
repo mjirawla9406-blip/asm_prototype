@@ -6,7 +6,7 @@ import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import useStore from '@/store/useStore';
 
-function SetPreview({ set, planes }) {
+function SetPreview({ set, planes, allSets }) {
     const setPlanes = useMemo(() => 
         planes.filter(p => p.set_id === set.set_id),
     [planes, set.set_id]);
@@ -34,30 +34,45 @@ function SetPreview({ set, planes }) {
             </div>
             
             <div style={{ flex: 1, position: 'relative' }}>
-                <Canvas camera={{ position: [avgCentroid[0] + 3, avgCentroid[1] + 3, avgCentroid[2] + 3], fov: 40 }}>
-                    <ambientLight intensity={1.0} />
-                    <pointLight position={[avgCentroid[0] + 10, avgCentroid[1] + 10, avgCentroid[2] + 10]} intensity={1.5} />
-                    
-                    <group position={[0, 0, 0]}>
-                        {setPlanes.map(p => {
-                            const centroid = new THREE.Vector3(...p.centroid);
-                            const normal = new THREE.Vector3(...p.normal).normalize();
-                            const up = new THREE.Vector3(0, 0, 1);
-                            const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
-                            const size = Math.sqrt(p.area || 1);
-                            const clampedSize = Math.max(0.1, Math.min(size, 1.5));
+                {allSets.indexOf(set) < 12 ? (
+                    <Canvas camera={{ position: [avgCentroid[0] + 3, avgCentroid[1] + 3, avgCentroid[2] + 3], fov: 40 }}>
+                        <ambientLight intensity={1.5} />
+                        <pointLight position={[avgCentroid[0] + 5, avgCentroid[1] + 5, avgCentroid[2] + 5]} intensity={2.0} />
+                        
+                        <group position={[0, 0, 0]}>
+                            {setPlanes.map(p => {
+                                const centroid = new THREE.Vector3(...p.centroid);
+                                const normal = new THREE.Vector3(...p.normal).normalize();
+                                const up = new THREE.Vector3(0, 0, 1);
+                                const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
+                                const size = Math.sqrt(p.area || 1);
+                                const clampedSize = Math.max(0.2, Math.min(size, 1.2));
 
-                            return (
-                                <mesh key={p.id} position={centroid} quaternion={quaternion}>
-                                    <planeGeometry args={[clampedSize, clampedSize]} />
-                                    <meshBasicMaterial color={p.color} side={THREE.DoubleSide} transparent opacity={0.8} />
-                                </mesh>
-                            );
-                        })}
-                    </group>
-                    
-                    <OrbitControls makeDefault enableZoom={false} target={new THREE.Vector3(...avgCentroid)} autoRotate autoRotateSpeed={1.0} />
-                </Canvas>
+                                return (
+                                    <mesh key={p.id} position={centroid} quaternion={quaternion}>
+                                        <planeGeometry args={[clampedSize, clampedSize]} />
+                                        <meshBasicMaterial color={p.color} side={THREE.DoubleSide} transparent opacity={0.6} />
+                                    </mesh>
+                                );
+                            })}
+                        </group>
+                        
+                        <OrbitControls makeDefault enableZoom={false} target={new THREE.Vector3(...avgCentroid)} autoRotate autoRotateSpeed={1.5} />
+                    </Canvas>
+                ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                        {/* 2D Orientation Dial (Fallback for stability when many sets present) */}
+                        <svg width="60" height="60" viewBox="0 0 100 100">
+                            <circle cx="50" cy="50" r="45" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
+                            <g transform={`rotate(${set.mean_dip_direction}, 50, 50)`}>
+                                <line x1="50" y1="50" x2="50" y2="15" stroke={set.color} strokeWidth="2" strokeLinecap="round" />
+                                <circle cx="50" cy="15" r="3" fill={set.color} />
+                                <line x1="50" y1="50" x2="50" y2={50 - (set.mean_dip / 90) * 35} 
+                                      stroke={set.color} strokeWidth="6" opacity="0.3" strokeLinecap="round" />
+                            </g>
+                        </svg>
+                    </div>
+                )}
             </div>
 
             <div style={{ 
@@ -97,7 +112,7 @@ export default function SetSubViews() {
                 paddingBottom: 6, scrollbarWidth: 'thin'
             }}>
                 {setsToShow.map(s => (
-                    <SetPreview key={s.set_id} set={s} planes={analysisResult.planes} />
+                    <SetPreview key={s.set_id} set={s} planes={analysisResult.planes} allSets={setsToShow} />
                 ))}
             </div>
         </div>

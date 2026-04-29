@@ -1,608 +1,419 @@
 'use client';
 
-import { useRef, useMemo, useEffect, useState, useCallback } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Html, GizmoHelper, GizmoViewport } from '@react-three/drei';
-import * as THREE from 'three';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import useStore from '@/store/useStore';
-import { getPointCloudData } from '@/lib/api';
 import {
-    RotateCcw, Eye, EyeOff, Layers, ArrowUpRight,
-    Tag, Grid3X3, Maximize2, Box, Crosshair, Settings2,
-    FileText, Plus, Database, Activity, Video, Camera, Ruler, Scissors, Share2, MousePointer2, Image, List, Settings
+  RotateCcw, Eye, EyeOff, Box, Camera, Grid3X3, Settings,
+  Maximize2, LayoutList as List, Ruler, Scissors, Wind,
+  Layers, Tag, ArrowUpRight
 } from 'lucide-react';
 
-const BRIGHT_COLORS = [
-    [0.1, 0.4, 1.0], // Bright Blue
-    [0.1, 1.0, 0.4], // Bright Green
-    [0.0, 1.0, 1.0], // Bright Cyan
-    [1.0, 0.2, 0.2], // Bright Red
-    [1.0, 0.1, 1.0], // Bright Magenta
-    [1.0, 0.9, 0.0], // Bright Yellow
-    [0.6, 1.0, 0.1], // Lime
-    [1.0, 0.5, 0.0], // Orange
-];
+const POTREE_VIEWER_URL = '/potree-viewer/index.html';
 
-function PointCloudMesh({ positions, colors, pointSize, viewMode }) {
-    const ref = useRef();
-
-    const finalColors = useMemo(() => {
-        if (!colors || !positions) return null;
-        
-        const count = positions.length;
-        const colorArray = new Float32Array(count * 3);
-        
-        // Handle different color sources
-        for (let i = 0; i < count; i++) {
-            // Default to gray if we are in 'original' mode
-            if (viewMode === 'original') {
-                colorArray[i * 3] = 0.95;
-                colorArray[i * 3 + 1] = 0.95;
-                colorArray[i * 3 + 2] = 0.95;
-                continue;
-            }
-
-            // In 'analyzed' mode, use the provided colors array
-            if (colors && colors[i]) {
-                const r = colors[i][0];
-                const g = colors[i][1];
-                const b = colors[i][2];
-
-                // Use the provided set color directly from the backend
-                colorArray[i * 3] = r;
-                colorArray[i * 3 + 1] = g;
-                colorArray[i * 3 + 2] = b;
-            } else {
-                // Fallback for missing colors
-                colorArray[i * 3] = 0.95;
-                colorArray[i * 3 + 1] = 0.95;
-                colorArray[i * 3 + 2] = 0.95;
-            }
-        }
-        return colorArray;
-    }, [positions, colors, viewMode]);
-
-    const geometry = useMemo(() => {
-        const geo = new THREE.BufferGeometry();
-        const posArray = new Float32Array(positions.length * 3);
-
-        for (let i = 0; i < positions.length; i++) {
-            posArray[i * 3] = positions[i][0];
-            posArray[i * 3 + 1] = positions[i][1];
-            posArray[i * 3 + 2] = positions[i][2];
-        }
-
-        geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-        if (finalColors) {
-            geo.setAttribute('color', new THREE.BufferAttribute(finalColors, 3));
-        }
-        return geo;
-    }, [positions, finalColors]);
-
-    return (
-        <points ref={ref} geometry={geometry}>
-            <pointsMaterial
-                vertexColors={!!finalColors}
-                color={!finalColors ? 'white' : undefined}
-                size={pointSize * 2.5}
-                sizeAttenuation
-                transparent={false}
-                opacity={1}
-                alphaTest={0.5}
-            />
-        </points>
-    );
+// ─── Toolbar Button Component ───────────────────────────────────────────────
+function TBtn({ icon: Icon, label, onClick, active, disabled, title }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title || label}
+      style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        gap: 3, padding: '6px 10px', borderRadius: 8, cursor: disabled ? 'not-allowed' : 'pointer',
+        border: `1px solid ${active ? 'rgba(59,130,246,0.6)' : 'rgba(255,255,255,0.06)'}`,
+        background: active ? 'rgba(59,130,246,0.18)' : 'transparent',
+        color: active ? '#60a5fa' : disabled ? 'rgba(148,163,184,0.35)' : '#94a3b8',
+        fontSize: 10, fontFamily: 'Inter, sans-serif', transition: 'all 0.18s',
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      <Icon size={15} />
+      {label}
+    </button>
+  );
 }
 
-function PlaneOverlays({ planes, visibleSets, selectedPlaneId, onSelectPlane, showNormals, showLabels }) {
-    if (!planes?.length) return null;
-
-    return (
-        <group>
-            {planes.map((plane) => {
-                if (!visibleSets.has(plane.set_id)) return null;
-
-                const color = new THREE.Color(plane.color);
-                const centroid = new THREE.Vector3(...plane.centroid);
-                const normal = new THREE.Vector3(...plane.normal).normalize();
-                const isSelected = selectedPlaneId === plane.id;
-
-                // Create plane mesh
-                const size = Math.sqrt(plane.area || 4);
-                const clampedSize = Math.max(0.5, Math.min(size, 3));
-
-                // Compute rotation from normal
-                const up = new THREE.Vector3(0, 0, 1);
-                const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
-
-                return (
-                    <group key={plane.id} position={centroid}>
-                        {/* Semi-transparent plane */}
-                        <mesh
-                            quaternion={quaternion}
-                            onClick={(e) => { e.stopPropagation(); onSelectPlane(plane.id); }}
-                        >
-                            <planeGeometry args={[clampedSize, clampedSize]} />
-                            <meshBasicMaterial
-                                color={color}
-                                transparent
-                                opacity={isSelected ? 0.5 : 0.25}
-                                side={THREE.DoubleSide}
-                                depthWrite={false}
-                            />
-                        </mesh>
-
-                        {/* Wireframe */}
-                        <mesh quaternion={quaternion}>
-                            <planeGeometry args={[clampedSize, clampedSize]} />
-                            <meshBasicMaterial
-                                color={color}
-                                wireframe
-                                transparent
-                                opacity={isSelected ? 0.8 : 0.4}
-                            />
-                        </mesh>
-
-                        {/* Normal vector arrow */}
-                        {showNormals && (
-                            <arrowHelper
-                                args={[
-                                    normal,
-                                    new THREE.Vector3(0, 0, 0),
-                                    1.2,
-                                    color.getHex(),
-                                    0.2,
-                                    0.1
-                                ]}
-                            />
-                        )}
-
-                        {/* Label */}
-                        {showLabels && (
-                            <Html
-                                position={[0, 0, 0.3]}
-                                style={{
-                                    background: 'rgba(0,0,0,0.8)',
-                                    color: plane.color,
-                                    padding: '2px 6px',
-                                    borderRadius: 4,
-                                    fontSize: 10,
-                                    fontWeight: 600,
-                                    whiteSpace: 'nowrap',
-                                    border: `1px solid ${plane.color}`,
-                                    pointerEvents: 'none',
-                                }}
-                            >
-                                P{plane.id} | {plane.dip?.toFixed(0)}°/{plane.dip_direction?.toFixed(0)}°
-                            </Html>
-                        )}
-
-                        {/* Selection glow ring */}
-                        {isSelected && (
-                            <mesh quaternion={quaternion}>
-                                <ringGeometry args={[clampedSize * 0.5, clampedSize * 0.55, 32]} />
-                                <meshBasicMaterial
-                                    color={color}
-                                    transparent
-                                    opacity={0.8}
-                                    side={THREE.DoubleSide}
-                                />
-                            </mesh>
-                        )}
-                    </group>
-                );
-            })}
-        </group>
-    );
-}
-
-function SceneSetup() {
-    const { camera } = useThree();
-
-    useEffect(() => {
-        camera.position.set(12, 10, 12);
-        camera.lookAt(0, 4, 0);
-    }, [camera]);
-
-    return null;
-}
-
-function AnimatedGrid() {
-    return (
-        <gridHelper
-            args={[30, 30, 0x2a2f3a, 0x14161c]}
-            position={[0, 0, 0]}
-        />
-    );
+function TSep() {
+  return <div style={{ width: 1, height: 26, background: 'rgba(255,255,255,0.06)', margin: '0 2px' }} />;
 }
 
 export default function PointCloudViewer() {
-    const {
-        pointCloudData, pointCloudLoading,
-        analysisResult, visibleSets,
-        selectedPlaneId, setSelectedPlaneId,
-        showPlanes, showNormals, showLabels,
-        setShowPlanes, setShowNormals, setShowLabels,
-        pointSize, setPointSize,
-        pointDensity, setPointDensity,
-        selectedScanId, setPointCloudData, setPointCloudLoading,
-        viewMode, setViewMode,
-        layoutMode, setLayoutMode
-    } = useStore();
+  const {
+    pointCloudLoading, pointCloudData,
+    asmResult, analysisResult,
+    visibleSets, showPlanes, showNormals, showLabels,
+    pointSize, setPointSize,
+    viewMode, setViewMode,
+    layoutMode, setLayoutMode,
+    setShowPlanes, setShowNormals, setShowLabels,
+    potreeOrigin, autoRotate,
+    currentScanId,
+  } = useStore();
 
-    const [showGrid, setShowGrid] = useState(true);
-    const [showControls, setShowControls] = useState(false);
-    const [localDensity, setLocalDensity] = useState(pointDensity);
-    const densityTimerRef = useRef(null);
+  const setPotreeOrigin = useCallback((o) => useStore.getState().setPotreeOrigin(o), []);
+  const setAutoRotate   = useCallback((v) => useStore.getState().setAutoRotate(v), []);
 
-    // Sync localDensity when store changes externally
-    useEffect(() => { setLocalDensity(pointDensity); }, [pointDensity]);
+  const [showControls, setShowControls] = useState(false);
+  const [activeTool,   setActiveTool]   = useState(null); // 'ruler' | 'clip' | null
+  const containerRef = useRef(null);
+  const iframeRef    = useRef(null);
 
-    // Debounced density change — re-fetches point cloud
-    const handleDensityChange = useCallback((newDensity) => {
-        setLocalDensity(newDensity);
-        if (densityTimerRef.current) clearTimeout(densityTimerRef.current);
-        densityTimerRef.current = setTimeout(async () => {
-            setPointDensity(newDensity);
-            if (selectedScanId) {
-                setPointCloudLoading(true);
-                try {
-                    const pcData = await getPointCloudData(selectedScanId, newDensity);
-                    setPointCloudData(pcData);
-                } catch (e) {
-                    console.error('Failed to re-fetch point cloud:', e);
-                } finally {
-                    setPointCloudLoading(false);
-                }
-            }
-        }, 500);
-    }, [selectedScanId, setPointDensity, setPointCloudData, setPointCloudLoading]);
+  const activeResult = asmResult || analysisResult;
+  const planes       = activeResult?.planes || [];
+  const sets         = asmResult?.joint_sets || analysisResult?.sets || [];
+  const setsCount    = asmResult?.joint_sets?.length ?? analysisResult?.num_sets ?? 0;
+  const hasResult    = !!activeResult && planes.length > 0;
 
-    const containerRef = useRef(null);
-
-    const takeScreenshot = useCallback(() => {
-        const canvas = containerRef.current.querySelector('canvas');
-        if (canvas) {
-            const dataURL = canvas.toDataURL('image/png');
-            const link = document.createElement('a');
-            link.download = `mine-scan-${new Date().getTime()}.png`;
-            link.href = dataURL;
-            link.click();
-        }
-    }, []);
-
-    const toggleFullscreen = useCallback(() => {
-        if (!document.fullscreenElement) {
-            containerRef.current.requestFullscreen().catch(err => {
-                console.error(`Error attempting to enable full-screen mode: ${err.message}`);
-            });
-        } else {
-            document.exitFullscreen();
-        }
-    }, []);
-
-    const planes = analysisResult?.planes || [];
-    const pcData = analysisResult?.point_cloud_data || pointCloudData;
-    
-    // Choose colors based on view mode and availability
-    let colors = pcData?.colors;
-    if (viewMode === 'analyzed' && analysisResult?.point_cloud_data) {
-        // Prefer set_colors if available, otherwise fallback to colors
-        if (!analysisResult.point_cloud_data.set_colors) {
-            console.warn('DEBUG - set_colors key is MISSING or FALSY');
-        } else {
-            console.log('DEBUG - set_colors size:', analysisResult.point_cloud_data.set_colors.length);
-            console.log('DEBUG - set_colors first 5:', JSON.stringify(analysisResult.point_cloud_data.set_colors.slice(0, 5)));
-        }
-        
-        if (analysisResult.point_cloud_data.set_colors && analysisResult.point_cloud_data.set_colors.length > 0) {
-            colors = analysisResult.point_cloud_data.set_colors;
-            console.log('DEBUG - Using set_colors for rendering');
-        } else {
-            console.warn('DEBUG - Falling back to original colors');
-            colors = analysisResult.point_cloud_data.colors;
-        }
+  // ── postMessage helper ────────────────────────────────────────────────────
+  const sendToViewer = useCallback((type, payload = {}) => {
+    try {
+      iframeRef.current?.contentWindow?.postMessage({ type, payload }, '*');
+    } catch (e) {
+      console.warn('[ViewerBridge] postMessage failed:', e);
     }
+  }, []);
 
-    const renderMain3D = () => (
-        <div style={{ flex: 1, position: 'relative', height: '100%', minHeight: 0 }}>
-            {pointCloudLoading && (
-                <div style={{
-                    position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    zIndex: 20, flexDirection: 'column', gap: 12,
-                }}>
-                    <div style={{
-                        width: 40, height: 40, border: '3px solid var(--border-color)',
-                        borderTopColor: 'var(--accent-primary)', borderRadius: '50%',
-                        animation: 'spin-slow 1s linear infinite',
-                    }} />
-                    <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading point cloud...</div>
-                </div>
-            )}
+  // ── Load LAS when scan selected ───────────────────────────────────────────
+  useEffect(() => {
+    if (!currentScanId || !iframeRef.current) return;
 
-            {!pcData && !pointCloudLoading && (
-                <div style={{
-                    position: 'absolute', inset: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    flexDirection: 'column', gap: 12,
-                    zIndex: 10, pointerEvents: 'none',
-                }}>
-                    <Box size={48} color="var(--text-muted)" strokeWidth={1} />
-                    <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-                        Select a scan to view the point cloud
-                    </div>
-                </div>
-            )}
+    const url = `http://localhost:8000/api/scans/${currentScanId}/file`;
+    let handshakeInterval;
+    let isLoaded = false;
 
-            <Canvas
-                camera={{ position: [10, 8, 10], fov: 50 }}
-                gl={{ antialias: true, alpha: true }}
-                style={{ background: 'linear-gradient(180deg, #0f172a 0%, #0a0e17 50%, #0f172a 100%)' }}
-            >
-                <SceneSetup />
+    const onMessage = (e) => {
+      if (e.data?.type === 'PONG' || e.data?.type === 'VIEWER_READY') {
+        if (!isLoaded) {
+          sendToViewer('LOAD_URL', { url });
+          isLoaded = true;
+          clearInterval(handshakeInterval);
+        }
+      }
+    };
 
-                {/* Lighting */}
-                <ambientLight intensity={0.5} />
-                <directionalLight position={[10, 10, 5]} intensity={0.8} />
-                <directionalLight position={[-10, -5, -5]} intensity={0.3} />
+    window.addEventListener('message', onMessage);
+    handshakeInterval = setInterval(() => { if (!isLoaded) sendToViewer('PING'); }, 500);
+    const timer = setTimeout(() => { if (!isLoaded) sendToViewer('LOAD_URL', { url }); }, 2000);
 
-                {/* Grid */}
-                {showGrid && <AnimatedGrid />}
+    return () => {
+      clearInterval(handshakeInterval);
+      clearTimeout(timer);
+      window.removeEventListener('message', onMessage);
+    };
+  }, [currentScanId, sendToViewer]);
 
-                {/* Centering Group with Z-up Rotation */}
-                {pcData?.positions && (() => {
-                    const positions = pcData.positions;
-                    let min = [Infinity, Infinity, Infinity];
-                    let max = [-Infinity, -Infinity, -Infinity];
-                    
-                    if (pcData.bbox) {
-                        min = pcData.bbox.min;
-                        max = pcData.bbox.max;
-                    } else {
-                        for (let i = 0; i < positions.length; i++) {
-                            const p = positions[i];
-                            min[0] = Math.min(min[0], p[0]); min[1] = Math.min(min[1], p[1]); min[2] = Math.min(min[2], p[2]);
-                            max[0] = Math.max(max[0], p[0]); max[1] = Math.max(max[1], p[1]); max[2] = Math.max(max[2], p[2]);
-                        }
-                    }
+  // ── Capture FILE_LOADED (cx, cy, cz) from Potree ─────────────────────────
+  useEffect(() => {
+    const onMessage = (e) => {
+      if (e.data?.type === 'FILE_LOADED' && e.data?.payload) {
+        setPotreeOrigin(e.data.payload);
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [setPotreeOrigin]);
 
-                    const center = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
-                    const size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-                    
-                    // In mining, Z is usually UP. In Three.js, Y is UP.
-                    // If we rotate the group by -90 deg around X, original Z becomes Three.js Y.
-                    // The "height" in the original coord system was Z (size[2]).
-                    return (
-                        <group 
-                            position={[0, size[2] / 2, 0]} 
-                            rotation={[-Math.PI / 2, 0, 0]}
-                        >
-                            <group position={[-center[0], -center[1], -center[2]]}>
-                                <PointCloudMesh
-                                    key={`${selectedScanId}-${viewMode}-${pcData?.positions?.length}`}
-                                    positions={pcData?.positions}
-                                    colors={colors}
-                                    pointSize={pointSize}
-                                    viewMode={viewMode}
-                                />
-                                {showPlanes && planes.length > 0 && (
-                                    <PlaneOverlays
-                                        planes={planes}
-                                        visibleSets={visibleSets}
-                                        selectedPlaneId={selectedPlaneId}
-                                        onSelectPlane={setSelectedPlaneId}
-                                        showNormals={showNormals}
-                                        showLabels={showLabels}
-                                    />
-                                )}
-                            </group>
-                        </group>
-                    );
-                })()}
+  // ── Send APPLY_PLANES when both analysis result + potreeOrigin are ready ──
+  useEffect(() => {
+    if (!activeResult || !potreeOrigin) {
+      sendToViewer('CLEAR_PLANES');
+      return;
+    }
+    if (planes.length === 0) return;
 
-                {/* Controls */}
-                <OrbitControls
-                    makeDefault
-                    enablePan
-                    enableZoom
-                    enableRotate
-                    dampingFactor={0.05}
-                    minDistance={2}
-                    maxDistance={50}
-                />
+    const pcd = activeResult?.point_cloud_data;
+    if (!pcd?.centroid || !pcd?.scale) return;
 
-                {/* Gizmo */}
-                <GizmoHelper alignment="bottom-right" margin={[60, 60]}>
-                    <GizmoViewport
-                        axisColors={['#FF4444', '#44DD44', '#4488FF']}
-                        labelColor="white"
-                    />
-                </GizmoHelper>
-            </Canvas>
+    sendToViewer('APPLY_PLANES', {
+      planes: planes.map(p => ({
+        centroid:      p.centroid,
+        normal:        p.normal,
+        area:          p.area,
+        color:         p.color,
+        set_id:        p.set_id,
+        dip:           p.dip,
+        dip_direction: p.dip_direction,
+      })),
+      viz_centroid:  pcd.centroid,
+      backend_scale: pcd.scale,
+      cx: potreeOrigin.cx,
+      cy: potreeOrigin.cy,
+      cz: potreeOrigin.cz,
+      set_color_map: null,
+    });
+  }, [activeResult, planes, potreeOrigin, sendToViewer]);
 
-            {/* Point count badge */}
-            {pcData && (
-                <div style={{
-                    position: 'absolute', bottom: 12, left: 12,
-                    background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
-                    padding: '6px 12px', borderRadius: 8,
-                    border: '1px solid var(--border-color)',
-                    fontSize: 11, color: 'var(--text-secondary)',
-                    display: 'flex', gap: 12, alignItems: 'center',
-                }}>
-                    <span><strong style={{ color: 'var(--accent-primary)' }}>{pcData.num_points?.toLocaleString()}</strong> points</span>
-                    {pcData.has_real_colors && (
-                        <span style={{ color: 'var(--success)', fontWeight: 600 }}>● RGB</span>
-                    )}
-                    {planes.length > 0 && (
-                        <span><strong style={{ color: 'var(--info)' }}>{planes.length}</strong> planes</span>
-                    )}
-                    {analysisResult?.num_sets > 0 && (
-                        <span><strong style={{ color: 'var(--success)' }}>{analysisResult.num_sets}</strong> sets</span>
-                    )}
-                </div>
-            )}
+  // ── Sync showPlanes ───────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_SHOW_PLANES', { visible: showPlanes });
+  }, [showPlanes, sendToViewer]);
 
-            {/* Point Cloud Controls Panel */}
-            {showControls && (
-                <div style={{
-                    position: 'absolute', bottom: 12, right: 12,
-                    background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(12px)',
-                    padding: '14px 16px', borderRadius: 12,
-                    border: '1px solid var(--border-color)',
-                    minWidth: 220, zIndex: 15,
-                }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 12, textTransform: 'uppercase' }}>Point Cloud Controls</div>
-                    <div style={{ marginBottom: 12 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Point Size</span>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent-primary)' }}>{pointSize.toFixed(3)}</span>
-                        </div>
-                        <input type="range" min="0.005" max="0.15" step="0.005" value={pointSize} onChange={(e) => setPointSize(parseFloat(e.target.value))} style={{ width: '100%', accentColor: 'var(--accent-primary)' }} />
-                    </div>
-                    <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Point Density</span>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--info)' }}>{localDensity >= 1000 ? `${(localDensity/1000).toFixed(0)}K` : localDensity}</span>
-                        </div>
-                        <input type="range" min="10000" max="500000" step="10000" value={localDensity} onChange={(e) => handleDensityChange(parseInt(e.target.value))} style={{ width: '100%', accentColor: 'var(--info)' }} />
-                    </div>
-                </div>
-            )}
+  // ── Sync showNormals ──────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_SHOW_NORMALS', { visible: showNormals });
+  }, [showNormals, sendToViewer]);
 
-            {/* Set legend overlay in main view */}
-            {analysisResult?.sets?.length > 0 && layoutMode === 'single' && (
-                <div style={{
-                    position: 'absolute', top: 12, right: 12,
-                    background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)',
-                    padding: '10px 14px', borderRadius: 10,
-                    border: '1px solid var(--border-color)',
-                    minWidth: 150,
-                }}>
-                    <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase' }}>
-                        Discontinuity Sets
-                    </div>
-                    {analysisResult.sets.map(s => (
-                        <div
-                            key={s.set_id}
-                            style={{
-                                display: 'flex', alignItems: 'center', gap: 8,
-                                padding: '4px 0', cursor: 'pointer', fontSize: 12,
-                                opacity: visibleSets.has(s.set_id) ? 1 : 0.4,
-                                transition: 'opacity 0.2s',
-                            }}
-                            onClick={() => useStore.getState().toggleSetVisibility(s.set_id)}
-                        >
-                            <span className="color-dot" style={{ background: s.color }} />
-                            <span style={{ color: 'var(--text-secondary)', flex: 1 }}>Set {s.set_id + 1}</span>
-                            <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{s.num_planes}p</span>
-                            {visibleSets.has(s.set_id) ? <Eye size={12} color="var(--text-muted)" /> : <EyeOff size={12} color="var(--text-muted)" />}
-                        </div>
-                    ))}
-                </div>
-            )}
+  // ── Sync showLabels ───────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_SHOW_LABELS', { visible: showLabels });
+  }, [showLabels, sendToViewer]);
+
+  // ── Sync visibleSets → Potree plane visibility ────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_VISIBLE_SETS', { visibleSetIds: Array.from(visibleSets) });
+  }, [visibleSets, sendToViewer]);
+
+  // ── Sync viewMode → color mode + plane visibility ─────────────────────────
+  useEffect(() => {
+    const mode = viewMode === 'original' ? 'rgb' : 'elev';
+    sendToViewer('SET_COLOR_MODE', { mode });
+    if (viewMode === 'original') {
+      sendToViewer('SET_SHOW_PLANES', { visible: false });
+    } else {
+      sendToViewer('SET_SHOW_PLANES', { visible: showPlanes });
+      sendToViewer('SET_VISIBLE_SETS', { visibleSetIds: Array.from(visibleSets) });
+    }
+  }, [viewMode, showPlanes, visibleSets, sendToViewer]);
+
+  // ── Sync point size ───────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_POINT_SIZE', { size: pointSize * 30 });
+  }, [pointSize, sendToViewer]);
+
+  // ── EDL default on ───────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_EDL', { enabled: true });
+  }, [sendToViewer]);
+
+  // ── Sync autoRotate ───────────────────────────────────────────────────────
+  useEffect(() => {
+    sendToViewer('SET_AUTO_ROTATE', { enabled: autoRotate });
+  }, [autoRotate, sendToViewer]);
+
+  // ── Sync viz points for set coloring (Overlay mode) ──────────────────────
+  useEffect(() => {
+    if (viewMode === 'analyzed' && activeResult?.point_cloud_data) {
+      console.log('[ViewerBridge] Loading viz points overlay for analyzed view');
+      sendToViewer('LOAD_VIZ_POINTS', {
+        positions: activeResult.point_cloud_data.positions,
+        colors: activeResult.point_cloud_data.set_colors,
+      });
+    } else {
+      sendToViewer('CLEAR_VIZ_POINTS');
+    }
+  }, [viewMode, activeResult, sendToViewer]);
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  const takeScreenshot = useCallback(() => {
+    try {
+      const canvas = iframeRef.current?.contentDocument?.querySelector('canvas');
+      if (canvas) {
+        const a = document.createElement('a');
+        a.download = `mine-scan-${Date.now()}.png`;
+        a.href = canvas.toDataURL('image/png');
+        a.click();
+      }
+    } catch (e) { console.warn('Screenshot failed (cross-origin?):', e); }
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    !document.fullscreenElement
+      ? el.requestFullscreen().catch(console.error)
+      : document.exitFullscreen();
+  }, []);
+
+  const handleToolToggle = useCallback((tool) => {
+    if (activeTool === tool) {
+      // Deactivate
+      setActiveTool(null);
+      sendToViewer('MEASURE', { tool: 'CLEAR' });
+      sendToViewer('CLIP',    { action: 'CLEAR' });
+    } else {
+      setActiveTool(tool);
+      if (tool === 'ruler') {
+        sendToViewer('MEASURE', { tool: 'DISTANCE' });
+      } else if (tool === 'clip') {
+        sendToViewer('CLIP', { action: 'ADD_BOX' });
+        sendToViewer('CLIP', { mode: 'CLIP_INSIDE' });
+      }
+    }
+  }, [activeTool, sendToViewer]);
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  const renderMain3D = () => (
+    <div style={{ flex: 1, position: 'relative', height: '100%', minHeight: 0 }}>
+
+      {/* Loading overlay */}
+      {pointCloudLoading && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.7)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 20, flexDirection: 'column', gap: 12 }}>
+          <div style={{ width: 40, height: 40, border: '3px solid var(--border-color)',
+            borderTopColor: 'var(--accent-primary)', borderRadius: '50%',
+            animation: 'spin-slow 1s linear infinite' }} />
+          <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>Loading point cloud…</div>
         </div>
-    );
+      )}
 
-    return (
-        <div style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            background: '#0d1117',
-            position: 'relative',
-            overflow: 'hidden',
-        }}>
-            {/* Viewer Header - Aligned with Platform */}
-            <div ref={containerRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
-            {/* Toolbar Header */}
-            <div style={{
-                height: 44, background: 'var(--bg-secondary)', borderBottom: '1px solid #2a2f3a',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 14px',
-                flexShrink: 0
+      {/* Empty state */}
+      {!currentScanId && !pointCloudLoading && (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', flexDirection: 'column', gap: 20,
+          zIndex: 10, background: '#0b0f1a' }}>
+          <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'rgba(59,130,246,0.1)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: '1px solid rgba(59,130,246,0.2)' }}>
+            <Box size={32} color="var(--accent-primary)" style={{ opacity: 0.8 }} />
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, margin: '0 0 8px 0', color: '#fff' }}>No Scan Selected</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0, opacity: 0.7 }}>
+              Select a scan from the library on the left
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Potree iframe */}
+      <iframe
+        ref={iframeRef}
+        src={POTREE_VIEWER_URL}
+        title="Potree Engine"
+        style={{ width: '100%', height: '100%', border: 'none', display: 'block', background: '#0a0e17' }}
+        allow="fullscreen"
+      />
+
+      {/* ── Point count badge ── */}
+      {pointCloudData && (
+        <div style={{ position: 'absolute', bottom: 12, left: 12,
+          background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+          padding: '5px 12px', borderRadius: 8,
+          border: '1px solid rgba(255,255,255,0.07)',
+          fontSize: 11, color: 'var(--text-secondary)',
+          display: 'flex', gap: 12, alignItems: 'center',
+          pointerEvents: 'none' }}>
+          <span><strong style={{ color: 'var(--accent-primary)' }}>
+            {pointCloudData.num_points?.toLocaleString()}
+          </strong> pts</span>
+          {planes.length > 0 && (
+            <span style={{ borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: 12 }}>
+              <strong style={{ color: '#60a5fa' }}>{planes.length}</strong> planes
+            </span>
+          )}
+          {setsCount > 0 && (
+            <span style={{ borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: 12 }}>
+              <strong style={{ color: '#10b981' }}>{setsCount}</strong> sets
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  // ── Toolbar ───────────────────────────────────────────────────────────────
+  const renderToolbar = () => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 2,
+      padding: '5px 10px',
+      background: 'rgba(10,14,23,0.95)',
+      borderBottom: '1px solid rgba(255,255,255,0.06)',
+      flexShrink: 0, flexWrap: 'wrap',
+    }}>
+      {/* Before / After toggle */}
+      <div style={{ display: 'flex', borderRadius: 7, overflow: 'hidden',
+        border: '1px solid rgba(255,255,255,0.08)', marginRight: 4 }}>
+        {['original', 'analyzed'].map((m) => (
+          <button key={m}
+            onClick={() => setViewMode(m)}
+            style={{
+              padding: '4px 12px', fontSize: 11, cursor: 'pointer',
+              background: viewMode === m ? 'rgba(59,130,246,0.25)' : 'transparent',
+              color: viewMode === m ? '#60a5fa' : '#94a3b8',
+              border: 'none', fontFamily: 'Inter, sans-serif',
+              borderRight: m === 'original' ? '1px solid rgba(255,255,255,0.06)' : 'none',
+              transition: 'all 0.15s',
             }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <Database size={15} color="var(--accent-primary)" />
-                        <h3 style={{ fontSize: 12, fontWeight: 700, color: '#fff', margin: 0, textTransform: 'uppercase', letterSpacing: '0.05em' }}>3D Point Cloud Viewer</h3>
-                    </div>
-                    
-                    <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', borderRadius: 6, padding: 2 }}>
-                        <button 
-                            onClick={() => setViewMode('original')}
-                            style={{
-                                padding: '4px 10px', border: 'none', borderRadius: 4, fontSize: 10, fontWeight: 700,
-                                background: viewMode === 'original' ? '#2a2f3a' : 'transparent',
-                                color: viewMode === 'original' ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                cursor: 'pointer', transition: 'all 0.2s',
-                                display: 'flex', alignItems: 'center', gap: 4
-                            }}
-                        >
-                            <Box size={12} /> Before
-                        </button>
-                        <button 
-                            onClick={() => setViewMode('analyzed')}
-                            style={{
-                                padding: '4px 10px', border: 'none', borderRadius: 4, fontSize: 10, fontWeight: 700,
-                                background: viewMode === 'analyzed' ? '#2a2f3a' : 'transparent',
-                                color: viewMode === 'analyzed' ? 'var(--accent-primary)' : 'var(--text-muted)',
-                                cursor: 'pointer', transition: 'all 0.2s',
-                                display: 'flex', alignItems: 'center', gap: 4
-                            }}
-                        >
-                            <Activity size={12} /> After
-                        </button>
-                    </div>
-                </div>
+            {m === 'original' ? 'Before' : 'After'}
+          </button>
+        ))}
+      </div>
 
-                {/* Toolbar Icons */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                    <Camera size={16} color="var(--text-secondary)" style={{ cursor: 'pointer' }} onClick={takeScreenshot} title="Capture View" />
-                    
-                    <MousePointer2 
-                        size={16} 
-                        color={showLabels ? 'var(--accent-primary)' : 'var(--text-secondary)'} 
-                        style={{ cursor: 'pointer' }} 
-                        onClick={() => setShowLabels(!showLabels)}
-                        title="Toggle Labels" 
-                    />
+      <TSep />
 
-                    <Grid3X3
-                        size={16}
-                        color={layoutMode === 'multi' ? 'var(--accent-cyan)' : 'var(--text-secondary)'}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => setLayoutMode(layoutMode === 'multi' ? 'single' : 'multi')}
-                        title="Toggle Multi-View Dashboard"
-                    />
+      {/* Reset view */}
+      <TBtn icon={RotateCcw} label="Reset"
+        onClick={() => sendToViewer('RESET_VIEW')} />
 
-                    <List 
-                        size={16} 
-                        color={showPlanes ? 'var(--accent-primary)' : 'var(--text-secondary)'} 
-                        style={{ cursor: 'pointer' }} 
-                        onClick={() => setShowPlanes(!showPlanes)}
-                        title="Toggle Analysis Planes" 
-                    />
+      {/* Auto-rotate */}
+      <TBtn icon={Wind} label="Spin"
+        active={autoRotate}
+        onClick={() => setAutoRotate(!autoRotate)} />
 
-                    <Settings
-                        size={16}
-                        color={showControls ? 'var(--accent-primary)' : 'var(--text-secondary)'}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => setShowControls(!showControls)}
-                        title="Point Controls" 
-                    />
+      <TSep />
 
-                    <div style={{ width: 1, height: 16, background: '#2a2f3a', margin: '0 2px' }} />
+      {/* Plane overlays toggle — only when analysis result exists */}
+      <TBtn icon={Layers} label="Planes"
+        active={showPlanes && hasResult}
+        disabled={!hasResult}
+        onClick={() => setShowPlanes(!showPlanes)} />
 
-                    <Maximize2 size={16} color="var(--text-secondary)" style={{ cursor: 'pointer' }} onClick={toggleFullscreen} title="Fullscreen" />
-                </div>
-            </div>
+      {/* Normals toggle */}
+      <TBtn icon={ArrowUpRight} label="Normals"
+        active={showNormals && hasResult}
+        disabled={!hasResult}
+        onClick={() => setShowNormals(!showNormals)} />
 
-            {/* Content Area - always shows just the 3D viewer */}
-            <div style={{ flex: 1, position: 'relative', display: 'flex', minHeight: 0 }}>
-                {renderMain3D()}
-            </div>
+      {/* Labels toggle */}
+      <TBtn icon={Tag} label="Labels"
+        active={showLabels && hasResult}
+        disabled={!hasResult}
+        onClick={() => setShowLabels(!showLabels)} />
+
+      <TSep />
+
+      {/* Ruler */}
+      <TBtn icon={Ruler} label="Ruler"
+        active={activeTool === 'ruler'}
+        onClick={() => handleToolToggle('ruler')} />
+
+      {/* Clip box */}
+      <TBtn icon={Scissors} label="Clip"
+        active={activeTool === 'clip'}
+        onClick={() => handleToolToggle('clip')} />
+
+      <TSep />
+
+      {/* Multi-panel toggle */}
+      <TBtn icon={Grid3X3} label="Multi"
+        active={layoutMode === 'multi'}
+        onClick={() => setLayoutMode(layoutMode === 'multi' ? 'single' : 'multi')} />
+
+      {/* Controls panel */}
+      <TBtn icon={Settings} label="Controls"
+        active={showControls}
+        onClick={() => setShowControls(v => !v)} />
+
+      {/* Screenshot */}
+      <TBtn icon={Camera} label="Screenshot"
+        onClick={takeScreenshot} />
+
+      {/* Fullscreen */}
+      <TBtn icon={Maximize2} label="Fullscreen"
+        onClick={toggleFullscreen} />
+    </div>
+  );
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column',
+      background: '#0d1117', position: 'relative', overflow: 'hidden' }}>
+      <div ref={containerRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {renderToolbar()}
+        <div style={{ flex: 1, position: 'relative', display: 'flex', minHeight: 0 }}>
+          {renderMain3D()}
         </div>
+      </div>
     </div>
   );
 }

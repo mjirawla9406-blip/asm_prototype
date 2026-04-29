@@ -4,7 +4,10 @@ Rule-based mining intelligence that generates safety,
 optimization, and risk insights from structural analysis.
 """
 import logging
-from typing import List, Dict
+import os
+from typing import List, Dict, Optional
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -337,3 +340,186 @@ class InsightsEngine:
                 })
 
         return insights
+
+    # ------------------------------------------------------------------ #
+    #  Fisher K-value computation
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def compute_fisher_k(planes: List[Dict], sets: List[Dict], labels, warnings_list=None) -> List[Dict]:
+        """
+        Compute Fisher concentration parameter (K-value) for each joint set.
+
+        K = (N - 1) / (N - R), where
+            N = number of planes in the set
+            R = resultant length = ||sum of unit normals||
+
+        Modifies *sets* in-place by adding 'fisher_k' and 'fisher_k_label'
+        fields to each set dict.
+
+        Args:
+            planes: List of plane dicts (must contain 'normal').
+            sets:   List of set dicts produced by SetClusterer.
+            labels: Array-like of cluster labels, same length as *planes*.
+            warnings_list: Optional list to append warning messages to.
+
+        Returns:
+            The same *sets* list, enriched with fisher_k / fisher_k_label.
+        """
+        labels = np.asarray(labels)
+
+        for s in sets:
+            set_id = s['set_id']
+            mask = labels == set_id
+            set_planes = [p for p, m in zip(planes, mask) if m]
+            N = len(set_planes)
+
+            if N < 3:
+                s['fisher_k'] = None
+                s['fisher_k_label'] = None
+                logger.warning(
+                    f"Insufficient planes for Fisher K in set {set_id} "
+                    f"(N={N}, need >=3)"
+                )
+                if warnings_list is not None:
+                    warnings_list.append(f"Insufficient planes for Fisher K in set {set_id} (N={N}, need >=3)")
+                continue
+
+            # Collect unit normal vectors (upper-hemisphere convention)
+            normals = []
+            for p in set_planes:
+                n = np.array(p['normal'], dtype=np.float64)
+                mag = np.linalg.norm(n)
+                if mag > 0:
+                    n = n / mag
+                if n[2] < 0:
+                    n = -n
+                normals.append(n)
+
+            normals = np.array(normals)
+            resultant = np.sum(normals, axis=0)
+            R = float(np.linalg.norm(resultant))
+
+            denom = N - R
+            if denom <= 0:
+                K = 9999.0  # effectively infinite concentration
+            else:
+                K = (N - 1) / denom
+
+            # Qualitative label
+            if K < 10:
+                label = "dispersed"
+            elif K <= 50:
+                label = "moderate"
+            else:
+                label = "strong"
+
+            s['fisher_k'] = round(float(K), 2)
+            s['fisher_k_label'] = label
+
+            logger.info(
+                f"Set {set_id}: Fisher K = {s['fisher_k']} ({label}), "
+                f"N={N}, R={R:.3f}"
+            )
+
+        return sets
+
+    # ------------------------------------------------------------------ #
+    #  Classified LAS export
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def export_classified_las(
+        planes: List[Dict],
+        labels: List[int],
+        source_points: np.ndarray,
+        output_path: str,
+        set_colors: Optional[Dict[int, str]] = None
+    ) -> str:
+        """
+        Write a colour-coded .las file where each point carries its joint
+        set ID as an extra scalar field (``joint_set_id``) and its assigned
+        set color in the RGB attributes.
+
+        Args:
+            planes:        List of plane dicts (must contain 'inlier_indices').
+            labels:        List of cluster labels (same length as *planes*).
+            source_points: Original point array (N, 3) before segmentation.
+            output_path:   Destination .las path.
+            set_colors:    Optional mapping of set_id -> hex_color.
+
+        Returns:
+            The absolute path of the saved file.
+        """
+        import laspy
+
+        N = len(source_points)
+        joint_ids = np.full(N, -1, dtype=np.int32)  # -1 = unclassified
+        
+        # Initialize colors (default grey)
+        r_arr = np.full(N, 100, dtype=np.uint16)
+        g_arr = np.full(N, 100, dtype=np.uint16)
+        b_arr = np.full(N, 100, dtype=np.uint16)
+
+        # Parse set colors if provided
+        set_rgb = {}
+        if set_colors:
+            for sid, hex_col in set_colors.items():
+                h = hex_col.lstrip('#')
+                if len(h) == 6:
+                    # LAS RGB is 16-bit (0-65535)
+                    r = int(h[0:2], 16) * 256
+                    g = int(h[2:4], 16) * 256
+                    b = int(h[4:6], 16) * 256
+                    set_rgb[sid] = (r, g, b)
+
+        for plane, label in zip(planes, labels):
+            sid = int(label)
+            rgb = set_rgb.get(sid, (150*256, 150*256, 150*256))
+            for idx in plane.get('inlier_indices', []):
+                if 0 <= idx < N:
+                    joint_ids[idx] = sid
+                    r_arr[idx] = rgb[0]
+                    g_arr[idx] = rgb[1]
+                    b_arr[idx] = rgb[2]
+
+        # --- Build LAS file --------------------------------------------------
+        # Use point_format=2 to support RGB colors
+        header = laspy.LasHeader(point_format=2, version="1.2")
+        header.offsets = np.min(source_points, axis=0)
+        header.scales = np.array([0.001, 0.001, 0.001])
+
+        las = laspy.LasData(header)
+        las.x = source_points[:, 0]
+        las.y = source_points[:, 1]
+        las.z = source_points[:, 2]
+        
+        las.red = r_arr
+        las.green = g_arr
+        las.blue = b_arr
+
+        # Add extra dimension for joint_set_id
+        las.add_extra_dim(laspy.ExtraBytesParams(
+            name="joint_set_id",
+            type=np.int32,
+            description="Joint set cluster label",
+        ))
+        las.joint_set_id = joint_ids
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        las.write(output_path)
+
+        abs_path = os.path.abspath(output_path)
+
+        # --- Logging summary -------------------------------------------------
+        unique, counts = np.unique(joint_ids, return_counts=True)
+        unclassified = int(counts[unique == -1][0]) if -1 in unique else 0
+        pct_unclassified = 100.0 * unclassified / N if N > 0 else 0.0
+
+        logger.info(f"Classified LAS written to {abs_path}")
+        for uid, cnt in zip(unique, counts):
+            tag = "unclassified" if uid == -1 else f"set {uid}"
+            logger.info(f"  {tag}: {cnt} points ({100 * cnt / N:.1f}%)")
+        logger.info(f"  Total unclassified: {pct_unclassified:.1f}%")
+
+        return abs_path
